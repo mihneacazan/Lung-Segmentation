@@ -11,8 +11,8 @@ from monai.metrics import DiceMetric
 from monai.transforms import Activations, AsDiscrete
 
 from src.config import CONFIG, OUTPUT_DIR
-from src.stage2_preprocessing.dataset import get_dataloaders
-from src.stage3_models.unet_2d import build_unet_2d
+from src.preprocessing.dataset import get_dataloaders
+from src.models.unet_2d import build_unet_2d
 
 def train_model():
     print("=== STARTING BASELINE 2D U-NET TRAINING PIPELINE ===")
@@ -23,10 +23,10 @@ def train_model():
     if device.type == "cpu":
         print("Note: Running on CPU. Epochs are optimized to run efficiently.")
         
-    # 2. Get DataLoaders from Stage 2 preprocessing module
+    # 2. Get DataLoaders from preprocessing module
     train_loader, val_loader = get_dataloaders(batch_size=CONFIG["batch_size"])
     
-    # 3. Model, Loss, Optimizer, Scheduler from Stage 3 models module
+    # 3. Model, Loss, Optimizer, Scheduler from models module
     model = build_unet_2d(in_channels=1, out_channels=1).to(device)
     
     # DiceCELoss combines Dice Loss + Cross Entropy for strong class imbalance resilience

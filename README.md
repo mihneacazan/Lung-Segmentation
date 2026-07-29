@@ -1,86 +1,100 @@
-# Lung Tumor Segmentation from CT Images (MSD Lung Task06)
+# 3D CT Lung Nodule Segmentation with 2D U-Net and MONAI
 
-This repository contains a modular, stage-based experimental pipeline for automatic semantic segmentation of lung cancer from 3D volumetric CT images using **PyTorch** and **MONAI**.
+A deep learning project for automated binary segmentation of lung nodules from 3D volumetric CT scans using PyTorch and MONAI. The model is trained and evaluated on the Medical Segmentation Decathlon (Task06 Lung) dataset.
 
 ---
 
-## 📁 Repository Structure
+## Project Overview
+
+This repository implements a baseline 2D U-Net segmentation pipeline for lung CT scans. The primary objective is to evaluate lightweight 2D architectures on volumetric medical imaging while mitigating spatial class imbalance and patient data leakage.
+
+Key technical aspects:
+* **Dataset:** 63 volumetric 3D CT scans from Medical Segmentation Decathlon (Task06_Lung).
+* **Architecture:** 2D U-Net (1.5M parameters) with residual blocks and skip connections.
+* **Preprocessing:** Patient-level zero-leakage split, Hounsfield Unit (HU) windowing ($[-1000, 400]$), 192x192 spatial normalization, and 1:1 positive-to-negative slice balancing.
+* **Loss Function:** `DiceCELoss` (combination of Dice Loss and Binary Cross-Entropy).
+* **Results:** Reached a validation Sørensen-Dice coefficient of **0.4978 (~50% overlap)** on unseen test patients over 50 epochs.
+
+---
+
+## Repository Structure
 
 ```text
 Decathlon_Lung/
-├── archive/                      # Raw dataset (imagesTr, labelsTr, imagesTs, dataset.json)
-├── docs/                         # Project Documentation & Study Documents
-│   ├── implementation_plan.md    # Project roadmap & planning
-│   ├── eda_report.md             # Exploratory Data Analysis report
-│   ├── unet_and_metrics_study.md # U-Net & medical metrics study
-│   └── kaggle_guide.md           # Kaggle GPU execution guide
-├── output/                       # Output artifacts (ignored by git, generated at runtime)
-│   ├── eda_figures/
-│   ├── preprocessed/
-│   ├── patient_split.json
-│   ├── training_metrics.csv
-│   └── best_metric_model.pth
-├── src/                          # Modular Python Source Code (Organized by Stages)
-│   ├── config.py                 # Global configurations & paths
-│   ├── stage1_eda/               # Stage 1: Exploratory Data Analysis
+├── docs/                         # Theoretical & Analytical Documentation
+│   ├── eda_report.md             # Dataset Exploratory Analysis Report
+│   └── unet_and_metrics_study.md # U-Net Architecture & Metric Formulations
+├── output/                       # Training Artifacts & Visualizations
+│   ├── eda_figures/              # EDA visualization plots
+│   ├── eda_statistics.csv        # Per-patient dataset statistics
+│   ├── patient_split.json        # Patient-level train/validation split
+│   ├── training_metrics.csv      # Per-epoch metric history
+│   └── training_curves.png       # Loss & Dice convergence curves
+├── src/                          # Project Python Package
+│   ├── config.py                 # Central configurations & path resolution
+│   ├── eda/                      # Exploratory Data Analysis routines
 │   │   └── eda_report.py
-│   ├── stage2_preprocessing/     # Stage 2: Preprocessing & Data Loaders
-│   │   ├── preprocessing.py      # Windowing, cropping, patient-split & 2D slicing
-│   │   └── dataset.py            # PyTorch / MONAI Dataset & DataLoader
-│   ├── stage3_models/            # Stage 3 & 4: Model Architectures
-│   │   └── unet_2d.py            # 2D U-Net baseline model
-│   └── stage6_visualization/     # Stage 6: Interactive Demo & Visualization
-│       └── visualizer.py         # Streamlit web app
+│   ├── preprocessing/            # HU windowing, slicing & PyTorch DataLoader
+│   │   ├── preprocessing.py
+│   │   └── dataset.py
+│   ├── models/                   # U-Net Neural Network Architectures
+│   │   └── unet_2d.py
+│   └── visualization/            # Streamlit Dashboards
+│       ├── visualizer.py         # CT Volume Explorer
+│       └── prediction_viewer.py  # Prediction Evaluation Dashboard
 ├── train.py                      # Main entrypoint script for model training
-├── requirements.txt              # Environment dependencies
-├── task.md                       # Task checklist
-└── README.md                     # Main entry Readme
+└── README.md                     # Project documentation
 ```
 
 ---
 
-## ⚙️ Installation and Setup
+## Pipeline & Architecture Details
 
-### 1. Prerequisites
-* Windows 10/11
-* Python 3.11.x (official CPython) installed
+### Preprocessing & Data Pipeline
+1. **HU Windowing:** CT voxel intensities are clamped to $[-1000, 400]$ HU (Lung Window) to isolate lung tissue, followed by min-max normalization to $[0.0, 1.0]$.
+2. **Patient-Level Split:** 51 patients allocated for training (80%) and 12 patients for validation (20%) to guarantee zero patient data leakage.
+3. **Slice Balancing:** Tumor-positive and negative slices are sampled at a 1:1 ratio to prevent the network from converging to a trivial background predictor.
 
-### 2. Set Up Virtual Environment
-Open a PowerShell terminal in the project root directory:
-```powershell
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-.\venv\Scripts\Activate.ps1
-```
-
-### 3. Install Dependencies
-Install all required packages:
-```powershell
-pip install -r requirements.txt
-```
+### Model Architecture
+The 2D U-Net uses the following configuration:
+* Input dimensions: `[Batch, 1, 192, 192]`
+* Encoder-Decoder Channels: `(16, 32, 64, 128, 256)`
+* Residual units: 2 residual units per resolution block ($y = f(x) + x$) for stable gradient flow.
+* Skip connections: Direct feature concatenation between encoder and decoder resolution levels.
 
 ---
 
-## 📊 How to Run the Pipeline Stages
+## Validation Results
 
-### Stage 1: Exploratory Data Analysis (EDA)
-```powershell
-python -m src.stage1_eda.eda_report
-```
+| Metric | Target | Result |
+| :--- | :---: | :---: |
+| **Best Validation Dice Score** | > 0.40 | **0.4978** |
+| **Train Loss (`DiceCELoss`)** | < 1.00 | **0.7404** |
+| **Validation Loss (`DiceCELoss`)** | < 1.00 | **0.8891** |
 
-### Stage 2: Data Preprocessing & Slicing
-```powershell
-python -m src.stage2_preprocessing.preprocessing
-```
+---
 
-### Stage 3: Baseline 2D U-Net Training
-```powershell
-python train.py
-```
+## Installation & Execution
 
-### Stage 6: Interactive Web App (Streamlit)
-```powershell
-streamlit run src/stage6_visualization/visualizer.py
-```
+### Prerequisites
+* Python 3.11+
+* PyTorch 2.1+
+* MONAI, Nibabel, SimpleITK, Streamlit, Pandas, Matplotlib
+
+### Setup & Running
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/mihneacazan/Decathlon_Lung_Segmentation.git
+   cd Decathlon_Lung_Segmentation
+   ```
+
+2. **Run Model Training:**
+   ```bash
+   python train.py
+   ```
+
+3. **Run Interactive Prediction Viewer (Streamlit):**
+   ```bash
+   streamlit run src/visualization/prediction_viewer.py
+   ```

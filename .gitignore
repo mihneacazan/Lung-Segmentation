@@ -1,39 +1,28 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / Python artifacts
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging / zips
-bin/
-build/
-dist/
-*.egg-info/
-*.zip
 
 # Virtual Environment
 venv/
 ENV/
 env/
 
-# Data and Artifacts (large folders & dataset)
+# Large Raw Data & Preprocessed Slices
 archive/
 output/preprocessed/
 output/*.pth
-artifacts/
+output/*.csv.bak
+*.zip
 
-# Editors and IDEs
+# Local-only Files (Not for GitHub)
+requirements.txt
+task.md
+docs/implementation_plan.md
+docs/kaggle_guide.md
+
+# Editors & OS artifacts
 .vscode/
 .idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.swp
-
-# OS-specific
 .DS_Store
 Thumbs.db
-._*

@@ -22,7 +22,7 @@ import matplotlib.colors as mcolors
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import src.config as config
-from src.stage3_models.unet_2d import build_unet_2d
+from src.models.unet_2d import build_unet_2d
 
 # ──────────────────────────────────────────────
 # Page Configuration
