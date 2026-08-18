@@ -17,6 +17,35 @@ alternatives to the baseline U-Net were not statistically separable from it.
 
 ---
 
+## Data
+
+The raw scans are not in this repository — 31 GB of NIfTI volumes, individually
+past GitHub's file size limit. Only `archive/dataset.json`, the manifest listing
+the 63 training cases and their labels, is committed so the expected layout is
+visible without downloading anything.
+
+Task06_Lung is available from the [Medical Segmentation
+Decathlon](http://medicaldecathlon.com/) directly, or as a
+[Kaggle mirror](https://www.kaggle.com/datasets/vivekprajapati2048/medical-segmentation-decathlon-lung)
+(the copy this project was developed against). Extract it into `archive/` at the
+repository root:
+
+```
+archive/
+  dataset.json          already present
+  imagesTr/             63 training volumes
+  labelsTr/             63 tumour masks
+  imagesTs/             test volumes (unlabelled, unused here)
+```
+
+The Decathlon archive circulates in several layouts — plain `.nii.gz`,
+decompressed `.nii`, and files nested one level deep inside a directory named
+after themselves. `resolve_nifti_path` in [src/config.py](src/config.py) tries
+each in turn, so any of them works without renaming files. On Kaggle the dataset
+directory is located automatically by searching for `dataset.json`.
+
+---
+
 ## Quick start
 
 ```bash
