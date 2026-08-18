@@ -1,322 +1,448 @@
 """
-Prediction Viewer: Interactive Streamlit app to compare
-model predictions vs ground truth masks on validation slices.
+Interactive viewer for comparing a trained model's prediction against the
+ground truth, one patient and one slice at a time.
 
-Usage (local):
-    streamlit run src/stage6_visualization/prediction_viewer.py
+    streamlit run src/visualization/prediction_viewer.py
 
-Requirements:
-    - Trained model checkpoint at output/best_metric_model.pth
-    - Preprocessed validation slices at output/preprocessed/val/
+Reads the checkpoints written under `output/experiments/`, runs inference on the
+selected patient, and reconstructs the prediction into that patient's original
+NIfTI geometry before drawing anything. That last part is the point: the
+per-patient numbers in `benchmark_report.json` are computed in original geometry
+against a ground truth read straight from the source archive, so a viewer working
+in the 192x192 preprocessed space would show a different object than the one that
+was scored. Here the Dice printed above the image is the same Dice as in the CSV.
+
+Inference runs on whatever device is available; the models are around 1.6M
+parameters and a single patient is a few hundred slices, so CPU is fine.
 """
+
+import glob
+import json
 import os
 import sys
-import glob
-import numpy as np
-import torch
-import streamlit as st
+
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+import nibabel as nib
+import numpy as np
+import streamlit as st
+import torch
 
-# Ensure project root is on path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 
-import src.config as config
-from src.models.unet_2d import build_unet_2d
-
-# ──────────────────────────────────────────────
-# Page Configuration
-# ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="Prediction Viewer - Lung Segmentation",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from src.config import OUTPUT_DIR, resolve_nifti_path
+from src.evaluation.metrics import (
+    compute_asd_3d,
+    compute_dice_3d,
+    compute_hd95_3d,
+    compute_precision_3d,
+    compute_sensitivity_3d,
+    count_false_positive_components,
+    filter_predicted_components,
+    reconstruct_patient_3d_volume,
 )
+from src.models.factory import build_model
 
-st.markdown("""
-<style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    .stSidebar { background-color: #1a1d23; }
-    h1 { color: #00d4ff; }
-    h2, h3 { color: #e0e0e0; }
-    .dice-good { color: #2ecc71; font-weight: bold; font-size: 1.3em; }
-    .dice-medium { color: #f39c12; font-weight: bold; font-size: 1.3em; }
-    .dice-bad { color: #e74c3c; font-weight: bold; font-size: 1.3em; }
-    .metric-box {
-        background: linear-gradient(135deg, #1a1d23, #2d3039);
-        border-radius: 12px;
-        padding: 18px;
-        border-left: 4px solid #00d4ff;
-        margin-bottom: 12px;
-        text-align: center;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="Prediction Viewer", page_icon="🔬",
+                   layout="wide", initial_sidebar_state="expanded")
 
-# ──────────────────────────────────────────────
-# Model Loading (cached for performance)
-# ──────────────────────────────────────────────
-@st.cache_resource
-def load_model(checkpoint_path):
-    """Load trained model from checkpoint."""
-    model = build_unet_2d(in_channels=1, out_channels=1)
-    
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-        epoch = checkpoint.get("epoch", "?")
-        val_dice = checkpoint.get("val_dice", "?")
-        st.sidebar.success(f"Model loaded from Epoch {epoch} (Val Dice: {val_dice})")
-    else:
-        model.load_state_dict(checkpoint)
-        st.sidebar.success("Model loaded (raw state dict).")
-    
+LUNG_WINDOW = (-1000.0, 400.0)
+MEDIASTINUM_WINDOW = (-150.0, 250.0)
+
+
+# ============================================================================
+#  DISCOVERY
+# ============================================================================
+
+def find_experiments():
+    """Returns {label: run_dir} for every checkpoint under output/experiments."""
+    runs = {}
+    pattern = os.path.join(OUTPUT_DIR, "experiments", "*", "seed_*", "best_model.pt")
+    for ckpt in sorted(glob.glob(pattern)):
+        run_dir = os.path.dirname(ckpt)
+        exp = os.path.basename(os.path.dirname(run_dir))
+        seed = os.path.basename(run_dir).replace("seed_", "")
+        runs[f"{exp} (seed {seed})"] = run_dir
+    return runs
+
+
+@st.cache_data(show_spinner=False)
+def load_run_metadata(run_dir):
+    """Config, reported metrics and per-patient scores for one run."""
+    with open(os.path.join(run_dir, "config.json")) as f:
+        config = json.load(f)
+
+    report = {}
+    report_path = os.path.join(run_dir, "benchmark_report.json")
+    if os.path.exists(report_path):
+        with open(report_path) as f:
+            report = json.load(f)
+
+    scores = {}
+    csv_path = os.path.join(run_dir, "test_results_per_patient.csv")
+    if os.path.exists(csv_path):
+        import csv as csv_mod
+        with open(csv_path) as f:
+            for row in csv_mod.DictReader(f):
+                scores[row["case_id"]] = float(row["dice_3d"])
+
+    return config, report, scores
+
+
+@st.cache_data(show_spinner=False)
+def load_split(split):
+    """Case ids belonging to one split."""
+    with open(os.path.join(OUTPUT_DIR, "preprocessed", "index.json")) as f:
+        return json.load(f)["splits"][split]
+
+
+# ============================================================================
+#  INFERENCE
+# ============================================================================
+
+@st.cache_resource(show_spinner=False)
+def load_model(run_dir):
+    """Builds the architecture recorded in config.json and loads its weights."""
+    with open(os.path.join(run_dir, "config.json")) as f:
+        config = json.load(f)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(config["model_type"], in_channels=config["n_adjacent"],
+                        out_channels=1).to(device)
+
+    state = torch.load(os.path.join(run_dir, "best_model.pt"),
+                       map_location=device, weights_only=False)
+    model.load_state_dict(state.get("model_state_dict", state))
     model.eval()
-    return model
+    return model, device, config
 
-@st.cache_data
-def load_validation_slices():
-    """Load all validation image/label pairs from preprocessed directory."""
-    val_img_dir = os.path.join(config.OUTPUT_DIR, "preprocessed", "val", "images")
-    val_lbl_dir = os.path.join(config.OUTPUT_DIR, "preprocessed", "val", "labels")
-    
-    img_paths = sorted(glob.glob(os.path.join(val_img_dir, "*.npy")))
-    
-    slices = []
-    for img_path in img_paths:
-        base = os.path.basename(img_path)
-        lbl_path = os.path.join(val_lbl_dir, base)
-        if os.path.exists(lbl_path):
-            slices.append({
-                "name": base.replace(".npy", ""),
-                "image": np.load(img_path).astype(np.float32),
-                "label": np.load(lbl_path).astype(np.float32),
-            })
-    return slices
 
-def compute_dice(pred, target):
-    """Compute Dice coefficient between two binary masks."""
-    pred_flat = pred.flatten()
-    target_flat = target.flatten()
-    intersection = np.sum(pred_flat * target_flat)
-    union = np.sum(pred_flat) + np.sum(target_flat)
-    if union == 0:
-        return 1.0 if np.sum(target_flat) == 0 else 0.0
-    return (2.0 * intersection) / union
+@st.cache_data(show_spinner=False)
+def predict_patient(run_dir, case_id):
+    """
+    Runs the model over every slice of one patient.
 
-def run_inference(model, image_np):
-    """Run model inference on a single 2D slice."""
+    Neighbour selection for the 2.5D models replicates `LungSliceDataset`
+    exactly, edge clipping included: out-of-range neighbours repeat the edge
+    slice rather than being zero-filled, because zero is a real intensity in this
+    normalized space and means air.
+
+    Returns:
+        np.ndarray: (192, 192, D) probabilities, before thresholding.
+    """
+    model, device, config = load_model(run_dir)
+    n_adjacent = config["n_adjacent"]
+    half = n_adjacent // 2
+
+    volumes = os.path.join(OUTPUT_DIR, "preprocessed", "volumes")
+    img = np.load(os.path.join(volumes, f"{case_id}_img.npy"), mmap_mode="r")
+    n_slices = img.shape[2]
+
+    probs = np.zeros((img.shape[0], img.shape[1], n_slices), dtype=np.float32)
+    progress = st.progress(0.0, text=f"Running inference on {case_id}...")
+
     with torch.no_grad():
-        tensor = torch.from_numpy(image_np).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-        logits = model(tensor)
-        prob = torch.sigmoid(logits).squeeze().numpy()
-    return prob
+        for start in range(0, n_slices, 16):
+            stop = min(start + 16, n_slices)
+            batch = []
+            for s in range(start, stop):
+                idx = [int(np.clip(s + o, 0, n_slices - 1))
+                       for o in range(-half, half + 1)]
+                batch.append(np.stack(
+                    [np.asarray(img[:, :, k], dtype=np.float32) for k in idx]))
 
-# ──────────────────────────────────────────────
-# Main App
-# ──────────────────────────────────────────────
-st.title("🔬 Prediction Viewer: Predicted vs Ground Truth")
-st.markdown("Compare the model's segmentation predictions against ground truth masks for **validation slices**.")
+            tensor = torch.from_numpy(np.stack(batch)).to(device)
+            out = torch.sigmoid(model(tensor)).cpu().numpy()[:, 0]
+            probs[:, :, start:stop] = np.moveaxis(out, 0, -1)
+            progress.progress(stop / n_slices, text=f"Running inference on {case_id}...")
 
-# Check for model checkpoint
-checkpoint_path = os.path.join(config.OUTPUT_DIR, "best_metric_model.pth")
-if not os.path.exists(checkpoint_path):
-    st.error(f"No trained model found at `{checkpoint_path}`. Please run training first or download the checkpoint from Kaggle.")
+    progress.empty()
+    return probs
+
+
+@st.cache_data(show_spinner=False)
+def reconstruct(run_dir, case_id, threshold, postproc_fraction):
+    """
+    Brings the prediction back into the patient's original NIfTI geometry and
+    scores it against the untouched ground truth.
+
+    Only the overlap metrics are computed here. On a 512x512x271 volume the
+    surface distances cost 44 s for HD95 and 38 s for ASD, and the connected
+    component count another 19 s, against 8 s for the whole overlap set — too slow
+    to sit between moving a slider and seeing an image. They are available on
+    demand through `surface_metrics`, and for the reported threshold they are
+    already in the per-patient CSV.
+
+    Returns:
+        tuple: (ct, ground_truth, prediction, metrics, components_removed)
+    """
+    probs = predict_patient(run_dir, case_id)
+
+    with open(os.path.join(OUTPUT_DIR, "metadata", f"{case_id}.json")) as f:
+        metadata = json.load(f)
+
+    pred = reconstruct_patient_3d_volume(probs, metadata, threshold=threshold,
+                                         binarize=True)
+
+    removed = 0
+    if postproc_fraction > 0:
+        pred, removed = filter_predicted_components(
+            pred, min_fraction=postproc_fraction)
+
+    ct = np.asanyarray(
+        nib.load(resolve_nifti_path(f"./imagesTr/{case_id}.nii.gz")).dataobj)
+    gt = (np.asanyarray(
+        nib.load(resolve_nifti_path(f"./labelsTr/{case_id}.nii.gz")).dataobj)
+        > 0.5).astype(np.uint8)
+
+    metrics = {
+        "dice_3d": compute_dice_3d(pred, gt),
+        "sensitivity_3d": compute_sensitivity_3d(pred, gt),
+        "precision_3d": compute_precision_3d(pred, gt),
+    }
+    return ct, gt, pred, metrics, removed
+
+
+@st.cache_data(show_spinner="Computing surface distances (~1.5 min)...")
+def surface_metrics(run_dir, case_id, threshold, postproc_fraction):
+    """HD95, ASD and the false-positive component count, on request only."""
+    _, gt, pred, _, _ = reconstruct(run_dir, case_id, threshold, postproc_fraction)
+    with open(os.path.join(OUTPUT_DIR, "metadata", f"{case_id}.json")) as f:
+        spacing = tuple(json.load(f)["original_spacing"])
+    return {
+        "hd95_3d": compute_hd95_3d(pred, gt, spacing),
+        "asd_3d": compute_asd_3d(pred, gt, spacing),
+        "fp_components": count_false_positive_components(pred, gt),
+    }
+
+
+# ============================================================================
+#  SLICE SELECTION
+# ============================================================================
+
+def slice_summary(gt, pred):
+    """Per-slice voxel counts and Dice, used to drive the jump selectors."""
+    axis = (0, 1)
+    gt_counts = gt.sum(axis=axis)
+    pred_counts = pred.sum(axis=axis)
+    overlap = np.logical_and(gt, pred).sum(axis=axis)
+    denominator = gt_counts + pred_counts
+    dice = np.divide(2.0 * overlap, denominator,
+                     out=np.zeros_like(denominator, dtype=float),
+                     where=denominator > 0)
+    return gt_counts, pred_counts, overlap, dice
+
+
+def interesting_slices(gt_counts, pred_counts, overlap, dice):
+    """
+    Named jump targets. The failure cases are the ones worth reaching in one
+    click: a slice where the tumour is large and the model saw nothing, and a
+    slice where the model marked a lot of tissue that is not tumour.
+    """
+    targets = {}
+    if gt_counts.max() > 0:
+        targets["Largest tumour (ground truth)"] = int(gt_counts.argmax())
+        matched = np.where(gt_counts > 0, dice, -1.0)
+        if matched.max() > 0:
+            targets["Best match"] = int(matched.argmax())
+        missed = np.where(gt_counts > 0, gt_counts - overlap, -1)
+        if missed.max() > 0:
+            targets["Largest miss (false negative)"] = int(missed.argmax())
+    false_positive = pred_counts - overlap
+    if false_positive.max() > 0:
+        targets["Largest false positive"] = int(false_positive.argmax())
+    return targets
+
+
+# ============================================================================
+#  UI
+# ============================================================================
+
+st.title("🔬 Prediction Viewer")
+
+experiments = find_experiments()
+if not experiments:
+    st.error(
+        f"No checkpoint under {os.path.join(OUTPUT_DIR, 'experiments')}. "
+        "Unpack `results_*.zip` there first.")
     st.stop()
 
-# Check for preprocessed validation data
-val_img_dir = os.path.join(config.OUTPUT_DIR, "preprocessed", "val", "images")
-if not os.path.exists(val_img_dir):
-    st.error(f"No preprocessed validation data found at `{val_img_dir}`. Please run preprocessing first.")
-    st.stop()
+st.sidebar.header("Model")
+run_label = st.sidebar.selectbox("Experiment", list(experiments))
+run_dir = experiments[run_label]
+config, report, scores = load_run_metadata(run_dir)
 
-# Load model and data
-model = load_model(checkpoint_path)
-all_slices = load_validation_slices()
+st.sidebar.caption(
+    f"{config['model_type']} · {config['loss_type']} · sampling {config['sampling']} "
+    f"· n_adjacent {config['n_adjacent']} · lr {config['lr']}")
 
-if len(all_slices) == 0:
-    st.error("No validation slices found.")
-    st.stop()
+st.sidebar.header("Patient")
+split = st.sidebar.radio("Split", ["test", "val"], horizontal=True)
+cases = load_split(split)
 
-# ──────────────────────────────────────────────
-# Sidebar: Filters & Controls
-# ──────────────────────────────────────────────
-st.sidebar.header("🎛️ Controls")
-
-# Filter mode
-filter_mode = st.sidebar.radio(
-    "Show slices:",
-    ["All Slices", "Only Tumor-Positive (GT has tumor)", "Only Tumor-Negative (GT is empty)"]
-)
-
-positive_indices = [i for i, s in enumerate(all_slices) if np.sum(s["label"]) > 0]
-negative_indices = [i for i, s in enumerate(all_slices) if np.sum(s["label"]) == 0]
-
-if filter_mode == "Only Tumor-Positive (GT has tumor)":
-    visible_indices = positive_indices
-elif filter_mode == "Only Tumor-Negative (GT is empty)":
-    visible_indices = negative_indices
+# Sorting by score puts the failures at the top, which is where the interesting
+# cases are; the reported number is only available for the split that was scored.
+if scores and split == "test":
+    cases = sorted(cases, key=lambda c: scores.get(c, 1.0))
+    labels = {c: f"{c}  —  Dice {scores[c]:.3f}" if c in scores else c for c in cases}
 else:
-    visible_indices = list(range(len(all_slices)))
+    cases = sorted(cases)
+    labels = {c: c for c in cases}
 
-if len(visible_indices) == 0:
-    st.warning("No slices match the current filter.")
-    st.stop()
+case_id = st.sidebar.selectbox("Case", cases, format_func=lambda c: labels[c])
 
-st.sidebar.markdown(f"""
-<div class="metric-box">
-    <strong>Total Val Slices:</strong> {len(all_slices)}<br/>
-    <strong>Tumor-Positive:</strong> {len(positive_indices)}<br/>
-    <strong>Tumor-Negative:</strong> {len(negative_indices)}<br/>
-    <strong>Currently Showing:</strong> {len(visible_indices)}
-</div>
-""", unsafe_allow_html=True)
+st.sidebar.header("Threshold and post-processing")
+default_threshold = float(report.get("optimal_threshold", 0.5))
+threshold = st.sidebar.slider("Binarisation threshold", 0.05, 0.99,
+                              default_threshold, step=0.01)
+st.sidebar.caption(f"Threshold chosen on validation for this run: {default_threshold}")
 
-# Threshold control
-threshold = st.sidebar.slider("Binarization Threshold:", 0.1, 0.9, 0.5, 0.05)
+apply_postproc = st.sidebar.checkbox(
+    "Filter small components", value=False,
+    help="Drops connected components below a fraction of the largest one — "
+         "the post-processing reported under the pp_ keys in the CSV.")
+postproc_fraction = st.sidebar.slider(
+    "Minimum fraction", 0.01, 0.50, float(config.get("postproc_min_fraction", 0.10)),
+    step=0.01, disabled=not apply_postproc) if apply_postproc else 0.0
 
-# Slice navigator
-slice_pos = st.sidebar.slider("Navigate Slices:", 0, len(visible_indices) - 1, 0)
-current_idx = visible_indices[slice_pos]
-current_slice = all_slices[current_idx]
+ct, gt, pred, metrics, removed = reconstruct(
+    run_dir, case_id, threshold, postproc_fraction)
 
-st.sidebar.markdown(f"**Current:** `{current_slice['name']}`")
+# --- Volume-level numbers -------------------------------------------------
 
-# ──────────────────────────────────────────────
-# Run Inference & Display
-# ──────────────────────────────────────────────
-image_np = current_slice["image"]
-label_np = current_slice["label"]
+reported = scores.get(case_id)
+at_reported_threshold = (abs(threshold - default_threshold) < 1e-9
+                         and postproc_fraction == 0)
 
-# Run model prediction
-prob_map = run_inference(model, image_np)
-pred_mask = (prob_map >= threshold).astype(np.float32)
+columns = st.columns(4)
+columns[0].metric(
+    "Dice 3D", f"{metrics['dice_3d']:.4f}",
+    delta=f"{metrics['dice_3d'] - reported:+.4f} vs reported"
+    if reported is not None and at_reported_threshold else None)
+columns[1].metric("Sensitivity", f"{metrics['sensitivity_3d']:.4f}")
+columns[2].metric("Precision", f"{metrics['precision_3d']:.4f}")
+columns[3].metric("Predicted / true volume",
+                  f"{pred.sum() / max(gt.sum(), 1):.2f}x")
 
-# Compute Dice
-dice_score = compute_dice(pred_mask, label_np)
+if removed:
+    st.caption(f"Post-processing: {removed} components removed.")
 
-# Color-code Dice
-if dice_score >= 0.7:
-    dice_class = "dice-good"
-elif dice_score >= 0.3:
-    dice_class = "dice-medium"
-else:
-    dice_class = "dice-bad"
+if st.checkbox("Compute HD95, ASD and false-positive components "
+               "(~1.5 min per patient)"):
+    surface = surface_metrics(run_dir, case_id, threshold, postproc_fraction)
+    surface_columns = st.columns(3)
+    surface_columns[0].metric("HD95 (mm)", f"{surface['hd95_3d']:.1f}")
+    surface_columns[1].metric("ASD (mm)", f"{surface['asd_3d']:.1f}")
+    surface_columns[2].metric("FP components", int(surface["fp_components"]))
+elif at_reported_threshold and case_id in scores:
+    st.caption(
+        "HD95 and the false-positive count for the reported threshold are already in "
+        f"`{os.path.basename(run_dir)}/test_results_per_patient.csv`; tick the box "
+        "above only if you have moved the threshold.")
 
-has_tumor_gt = np.sum(label_np) > 0
-has_tumor_pred = np.sum(pred_mask) > 0
+# --- Slice navigation -----------------------------------------------------
 
-# Header metrics
-col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-with col_m1:
-    st.markdown(f"<div class='metric-box'><small>Dice Score</small><br/><span class='{dice_class}'>{dice_score:.4f}</span></div>", unsafe_allow_html=True)
-with col_m2:
-    gt_status = "🔴 TUMOR" if has_tumor_gt else "🟢 CLEAN"
-    st.markdown(f"<div class='metric-box'><small>Ground Truth</small><br/><b>{gt_status}</b></div>", unsafe_allow_html=True)
-with col_m3:
-    pred_status = "🔴 DETECTED" if has_tumor_pred else "🟢 NONE"
-    st.markdown(f"<div class='metric-box'><small>Prediction</small><br/><b>{pred_status}</b></div>", unsafe_allow_html=True)
-with col_m4:
-    max_prob = float(np.max(prob_map))
-    st.markdown(f"<div class='metric-box'><small>Max Probability</small><br/><b>{max_prob:.4f}</b></div>", unsafe_allow_html=True)
+gt_counts, pred_counts, overlap, slice_dice = slice_summary(gt, pred)
+targets = interesting_slices(gt_counts, pred_counts, overlap, slice_dice)
 
-# ──────────────────────────────────────────────
-# Visualization: 4-Panel View
-# ──────────────────────────────────────────────
-fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-fig.patch.set_facecolor('#0e1117')
+navigation, options = st.columns([3, 1])
 
-titles = ["CT Slice (Input)", "Ground Truth Mask", "Predicted Mask", "Overlay Comparison"]
-colors_title = ["#ffffff", "#2ecc71", "#e74c3c", "#00d4ff"]
+with options:
+    st.subheader("Display")
+    window_name = st.radio("HU window",
+                           ["Lung", "Mediastinum", "Raw"], index=0)
+    hu_min, hu_max = {
+        "Lung": LUNG_WINDOW,
+        "Mediastinum": MEDIASTINUM_WINDOW,
+        "Raw": (float(ct.min()), float(ct.max())),
+    }[window_name]
 
-for ax, title, color in zip(axes, titles, colors_title):
-    ax.set_facecolor('#0e1117')
-    ax.set_title(title, fontsize=12, fontweight='bold', color=color, pad=10)
-    ax.axis('off')
+    show_gt = st.checkbox("Ground truth (red)", value=True)
+    show_pred = st.checkbox("Prediction (blue)", value=True)
+    fill = st.checkbox("Fill, not just outline", value=False)
 
-# Panel 1: CT Slice
-axes[0].imshow(image_np.T, cmap='gray', origin='lower')
+    st.divider()
+    st.write("**Jump to slice**")
+    if targets:
+        target_name = st.selectbox("Notable slices", list(targets))
+        if st.button("Go there", use_container_width=True):
+            st.session_state.slice_index = targets[target_name]
+    else:
+        st.caption("No tumour and no prediction in this volume.")
 
-# Panel 2: Ground Truth Mask (green)
-axes[1].imshow(image_np.T, cmap='gray', origin='lower', alpha=0.4)
-if has_tumor_gt:
-    gt_masked = np.ma.masked_where(label_np == 0, label_np)
-    axes[1].imshow(gt_masked.T, cmap='Greens', origin='lower', alpha=0.8, vmin=0, vmax=1)
-    axes[1].contour(label_np.T, colors='lime', linewidths=1.5, origin='lower', levels=[0.5])
+    positive = np.where(gt_counts > 0)[0]
+    if len(positive):
+        st.caption(f"Ground truth in slices {positive.min()}–{positive.max()} "
+                   f"({len(positive)} slices)")
+    predicted = np.where(pred_counts > 0)[0]
+    if len(predicted):
+        st.caption(f"Prediction in slices {predicted.min()}–{predicted.max()} "
+                   f"({len(predicted)} slices)")
 
-# Panel 3: Predicted Mask (red)
-axes[2].imshow(image_np.T, cmap='gray', origin='lower', alpha=0.4)
-if has_tumor_pred:
-    pred_masked = np.ma.masked_where(pred_mask == 0, pred_mask)
-    axes[2].imshow(pred_masked.T, cmap='Reds', origin='lower', alpha=0.8, vmin=0, vmax=1)
-    axes[2].contour(pred_mask.T, colors='red', linewidths=1.5, origin='lower', levels=[0.5])
+with navigation:
+    # Streamlit rejects a slider given both a value and a key already present in
+    # session state, and the jump buttons need to write into that key. So the
+    # default is seeded here instead, and reseeded whenever the patient changes —
+    # otherwise a slice index from a 337-slice volume survives into a 271-slice
+    # one and lands out of range.
+    default_slice = (int(gt_counts.argmax()) if gt_counts.max() > 0
+                     else ct.shape[2] // 2)
+    if st.session_state.get("viewer_case") != (run_dir, case_id):
+        st.session_state.viewer_case = (run_dir, case_id)
+        st.session_state.slice_index = default_slice
+    st.session_state.slice_index = int(
+        np.clip(st.session_state.get("slice_index", default_slice),
+                0, ct.shape[2] - 1))
 
-# Panel 4: Overlay (Green=GT, Red=Pred, Yellow=Overlap)
-axes[3].imshow(image_np.T, cmap='gray', origin='lower', alpha=0.5)
-if has_tumor_gt or has_tumor_pred:
-    # Create RGB overlay: Green=GT only, Red=Pred only, Yellow=Both
-    overlay = np.zeros((*image_np.shape, 3))
-    overlay[:, :, 1] = label_np * 0.7      # Green channel = Ground Truth
-    overlay[:, :, 0] = pred_mask * 0.7      # Red channel = Prediction
-    # Where both overlap, both R and G are active → Yellow
-    overlay_masked = np.ma.masked_where(
-        np.repeat((label_np + pred_mask)[:, :, np.newaxis] == 0, 3, axis=2),
-        overlay
-    )
-    axes[3].imshow(np.transpose(overlay_masked, (1, 0, 2)), origin='lower', alpha=0.8)
-    # Legend text
-    axes[3].text(5, 10, "Green=GT  Red=Pred  Yellow=Both", fontsize=8,
-                 color='white', bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7),
-                 transform=axes[3].transData)
+    slice_index = st.slider("Slice", 0, ct.shape[2] - 1, key="slice_index")
 
-plt.tight_layout()
-st.pyplot(fig)
-plt.close()
+    ct_slice = np.clip(ct[:, :, slice_index], hu_min, hu_max)
+    gt_slice = gt[:, :, slice_index]
+    pred_slice = pred[:, :, slice_index]
 
-# ──────────────────────────────────────────────
-# Probability Heatmap
-# ──────────────────────────────────────────────
-with st.expander("🔥 View Raw Probability Heatmap", expanded=False):
-    fig2, ax2 = plt.subplots(figsize=(6, 6))
-    fig2.patch.set_facecolor('#0e1117')
-    ax2.set_facecolor('#0e1117')
-    im = ax2.imshow(prob_map.T, cmap='hot', origin='lower', vmin=0, vmax=1)
-    ax2.set_title("Model Output Probability Map", fontsize=12, fontweight='bold', color='white')
-    ax2.axis('off')
-    cbar = plt.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
-    cbar.set_label('Tumor Probability', color='white')
-    cbar.ax.yaxis.set_tick_params(color='white')
-    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+    n_gt, n_pred = int(gt_slice.sum()), int(pred_slice.sum())
+    n_overlap = int(np.logical_and(gt_slice, pred_slice).sum())
+    st.markdown(
+        f"**Slice {slice_index}** · ground truth `{n_gt}` px · prediction `{n_pred}` px · "
+        f"overlap `{n_overlap}` px · 2D Dice `{slice_dice[slice_index]:.3f}`")
+
+    figure, axis = plt.subplots(figsize=(8, 8))
+    figure.patch.set_facecolor("#0e1117")
+    axis.imshow(ct_slice.T, cmap="gray", origin="lower")
+
+    if show_gt and n_gt:
+        if fill:
+            axis.imshow(np.ma.masked_where(gt_slice == 0, gt_slice).T,
+                        cmap="Reds", origin="lower", alpha=0.35, vmin=0, vmax=1)
+        axis.contour(gt_slice.T, colors="#ff3b3b", linewidths=1.4,
+                     origin="lower", levels=[0.5])
+    if show_pred and n_pred:
+        if fill:
+            axis.imshow(np.ma.masked_where(pred_slice == 0, pred_slice).T,
+                        cmap="Blues", origin="lower", alpha=0.35, vmin=0, vmax=1)
+        axis.contour(pred_slice.T, colors="#00b4ff", linewidths=1.4,
+                     origin="lower", levels=[0.5])
+
+    axis.axis("off")
     plt.tight_layout()
-    st.pyplot(fig2)
-    plt.close()
+    st.pyplot(figure)
+    plt.close(figure)
 
-# ──────────────────────────────────────────────
-# Batch Dice Summary
-# ──────────────────────────────────────────────
-with st.expander("📊 Dice Score Summary (All Validation Slices)", expanded=False):
-    st.markdown("Computing Dice scores for all validation slices...")
-    
-    all_dice_scores = []
-    for s in all_slices:
-        prob = run_inference(model, s["image"])
-        pred = (prob >= threshold).astype(np.float32)
-        d = compute_dice(pred, s["label"])
-        all_dice_scores.append({"name": s["name"], "dice": d, "has_tumor": np.sum(s["label"]) > 0})
-    
-    import pandas as pd
-    df_dice = pd.DataFrame(all_dice_scores)
-    
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        st.metric("Mean Dice (All)", f"{df_dice['dice'].mean():.4f}")
-    with col_s2:
-        tumor_df = df_dice[df_dice['has_tumor'] == True]
-        st.metric("Mean Dice (Tumor Slices)", f"{tumor_df['dice'].mean():.4f}" if len(tumor_df) > 0 else "N/A")
-    with col_s3:
-        clean_df = df_dice[df_dice['has_tumor'] == False]
-        st.metric("Mean Dice (Clean Slices)", f"{clean_df['dice'].mean():.4f}" if len(clean_df) > 0 else "N/A")
-    
-    st.dataframe(df_dice.sort_values("dice", ascending=True).head(20), use_container_width=True)
+# --- Where the two masks live along Z -------------------------------------
+
+with st.expander("Distribution along Z", expanded=True):
+    figure, axis = plt.subplots(figsize=(12, 2.6))
+    z = np.arange(len(gt_counts))
+    axis.fill_between(z, gt_counts, color="#ff3b3b", alpha=0.55, label="ground truth")
+    axis.fill_between(z, pred_counts, color="#00b4ff", alpha=0.45, label="prediction")
+    axis.axvline(slice_index, color="#ffffff", linewidth=1.0, linestyle="--")
+    axis.set_xlabel("slice")
+    axis.set_ylabel("pixels")
+    axis.legend(loc="upper right")
+    st.pyplot(figure)
+    plt.close(figure)
+
+    st.caption(
+        "If the two areas do not overlap at all, the model is segmenting something "
+        "other than the tumour — a Dice of 0 with a non-zero false-positive count "
+        "means it is predicting, just in the wrong place.")

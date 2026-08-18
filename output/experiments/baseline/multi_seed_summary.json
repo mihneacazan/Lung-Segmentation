@@ -1,0 +1,38 @@
+{
+    "exp_name": "baseline",
+    "seeds": [
+        42,
+        43,
+        44
+    ],
+    "config": {
+        "exp_name": "expE1_unet_baseline",
+        "seed": 42,
+        "epochs": 100,
+        "batch_size": 16,
+        "lr": 0.001,
+        "model_type": "unet",
+        "loss_type": "dice_ce",
+        "augment": "anatomic",
+        "sampling": "all",
+        "n_adjacent": 1,
+        "patience": 20,
+        "min_epochs": 15,
+        "lr_t_max": 50,
+        "max_grad_norm": 1.0,
+        "postproc_min_fraction": 0.1
+    },
+    "mean_dice": 0.4852512041754976,
+    "std_dice": 0.015349552945310761,
+    "mean_hd95": 112.63550823406042,
+    "std_hd95": 14.99661615515185,
+    "mean_sensitivity": 0.4230562388701554,
+    "std_sensitivity": 0.008915835150323095,
+    "mean_precision": 0.6540437038279399,
+    "std_precision": 0.01646622900831276,
+    "per_seed_dice": {
+        "42": 0.5069428254976003,
+        "43": 0.47512534958617725,
+        "44": 0.47368543744271524
+    }
+}

@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from monai.networks.nets import UNet
 
 def build_unet_2d(in_channels=1, out_channels=1):

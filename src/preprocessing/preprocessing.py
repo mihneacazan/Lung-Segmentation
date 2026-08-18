@@ -1,214 +1,489 @@
+"""
+Anatomically-Correct Preprocessing Pipeline for Lung Tumor Segmentation.
+
+Transforms raw NIfTI CT volumes and their ground-truth masks into preprocessed
+2D axial slice stacks, stored one .npy volume per patient.
+
+Pipeline per patient:
+    1. Load NIfTI image + label, and run per-case integrity checks.
+    2. Reorient to canonical RAS, recording the exact transform so it can be
+       inverted at evaluation time.
+    3. Resample to 1.0mm isotropic spacing (trilinear for CT, nearest for masks).
+    4. Crop to the body bounding box, in Hounsfield Units.
+    5. Apply HU lung windowing [-1000, +400] and normalize to [0, 1].
+    6. Resize each axial slice to 192x192.
+    7. Save the slice stack, reconstruction metadata, and a QC record that
+       measures how much the preprocessing itself costs.
+
+Storage layout
+--------------
+One .npy per patient rather than one per slice. This matters for three reasons:
+    - Positive/negative slice sampling becomes a runtime choice instead of being
+      baked into the files on disk, so `--sampling balanced` and `--sampling all`
+      can share a single preprocessed dataset.
+    - A 2.5D model needs a slice's Z-neighbours, which only exist if the whole
+      volume is stored.
+    - 63 files instead of ~35,000 is dramatically faster to upload to and read
+      from Kaggle.
+
+Quality control
+---------------
+Every patient's label mask is pushed through the full forward pipeline and then
+reconstructed back into original NIfTI geometry. The resulting Dice is the
+ceiling no model can beat, and any geometry bug (a missing flip, a bad crop
+inverse) drives it towards zero and is caught here rather than being mistaken
+for poor model performance.
+
+Usage:
+    python -m src.preprocessing.preprocessing
+"""
+
 import os
 import json
-import random
+import shutil
+import csv
 import numpy as np
 import nibabel as nib
 from tqdm import tqdm
-import src.config as config
-from src.config import resolve_nifti_path
+
+from src.config import resolve_nifti_path, OUTPUT_DIR, DATA_DIR
+from src.preprocessing.create_split import load_patient_split
+from src.geometry import (
+    TARGET_SPACING,
+    get_ornt,
+    reorient_to_canonical,
+    permute_spacing,
+    resample_volume,
+    resize_slice_2d,
+    crop_body_3d,
+    apply_crop,
+    reconstruct_to_original_geometry,
+)
+
+
+# HU windowing range for lung CT imaging
+HU_MIN = -1000.0   # Air / lung parenchyma lower bound
+HU_MAX = 400.0     # Soft tissue / tumor upper bound
+
+# Target 2D slice size after cropping and resizing
+TARGET_SLICE_SIZE = (192, 192)
+
+# A slice counts as containing body (rather than pure air) above this mean
+# normalized intensity. Used to mark which negative slices are worth sampling.
+BODY_SLICE_MIN_MEAN = 0.05
+
 
 def get_preprocessed_dir():
-    """
-    Construiește și returnează calea către folderul de ieșire al feliilor preprocesate.
-    """
-    return os.path.join(config.OUTPUT_DIR, "preprocessed")
+    """Returns the base path for preprocessed output: output/preprocessed/"""
+    return os.path.join(OUTPUT_DIR, "preprocessed")
 
-def create_patient_split():
-    """
-    Creează o împărțire reproductibilă a datelor la nivel de pacient (80% train, 20% validation)
-    și o salvează într-un fișier JSON pentru a preveni scurgerea de date (data leakage).
-    """
-    # 1. Definim calea către fișierul JSON de splitare
-    split_json_path = os.path.join(config.OUTPUT_DIR, "patient_split.json")
-    
-    # 2. Dacă fișierul de split există deja pe disc, îl încărcăm direct pentru consistență
-    if os.path.exists(split_json_path):
-        with open(split_json_path, 'r') as f:
-            return json.load(f)
-            
-    # 3. Citim lista pacienților din dataset.json
-    dataset_json_path = os.path.join(config.DATA_DIR, "dataset.json")
-    with open(dataset_json_path, 'r') as f:
-        dataset_info = json.load(f)
-        
-    # 4. Extragem numele curate ale cazurilor (ex: "lung_001")
-    training_cases = dataset_info["training"]
-    case_names = [os.path.basename(c["image"]).replace(".gz", "") for c in training_cases]
-    
-    # 5. Fixăm seed-ul aleator pentru reproductibilitate exactă (seed=42)
-    random.seed(config.CONFIG["seed"])
-    
-    # 6. Amestecăm aleatoriu lista numelor pacienților
-    random.shuffle(case_names)
-    
-    # 7. Calculăm numărul de pacienți alocați pentru validare (20%)
-    num_val = int(len(case_names) * config.CONFIG["val_split"])
-    val_cases = case_names[:num_val]
-    train_cases = case_names[num_val:]
-    
-    # 8. Structurăm dicționarul de splitare
-    split = {
-        "train": train_cases,
-        "val": val_cases
-    }
-    
-    # 9. Salvăm dicționarul de splitare în format JSON pe disc
-    with open(split_json_path, 'w') as f:
-        json.dump(split, f, indent=4)
-        
-    print(f"Created patient-level split. Train: {len(train_cases)} patients, Val: {len(val_cases)} patients.")
-    return split
 
-def apply_lung_window(img_data):
+def get_volumes_dir():
+    """Returns the path holding one .npy slice stack per patient."""
+    return os.path.join(get_preprocessed_dir(), "volumes")
+
+
+def get_metadata_dir():
+    """Returns the path for per-patient reconstruction metadata: output/metadata/"""
+    return os.path.join(OUTPUT_DIR, "metadata")
+
+
+def clean_preprocessed_directory():
     """
-    Aplică ferestruirea Hounsfield Unit (HU) specifică plămânilor [-1000, 400] HU
-    și normalizează valorile în intervalul [0.0, 1.0].
+    Removes output/preprocessed/ before regenerating.
+
+    Without this, changing the patient split and re-running would leave slices
+    from a patient who moved between splits sitting in their old folder, and the
+    model would be evaluated on data it had already trained on.
     """
-    # 1. Extragem limitele ferestrei pulmonare din configurație
-    hu_min = config.CONFIG["hu_min"] # -1000 HU (aer/plămân)
-    hu_max = config.CONFIG["hu_max"] # +400 HU (țesut moale)
-    
-    # 2. Limităm (clamp/clip) valorile pixelilor între hu_min și hu_max
-    windowed = np.clip(img_data, hu_min, hu_max)
-    
-    # 3. Normalizăm min-max pentru a scala valorile în intervalul [0.0, 1.0]
-    normalized = (windowed - hu_min) / (hu_max - hu_min)
-    
-    # 4. Returnăm matricea convertită la float32 (potrivită pentru rețele neuronale)
+    preprocessed_dir = get_preprocessed_dir()
+    if os.path.exists(preprocessed_dir):
+        print(f"[CLEAN] Removing stale preprocessed directory: {preprocessed_dir}")
+        shutil.rmtree(preprocessed_dir)
+    print("[CLEAN] Preprocessed directory is clean.")
+
+
+def apply_hu_windowing(img_hu):
+    """
+    Clips a CT volume to the lung-relevant Hounsfield window and normalizes to
+    [0, 1].
+
+    CT density reference points:
+        -1000 HU = air (inside lungs and outside the body)
+            0 HU = water
+         +400 HU = soft tissue and tumor
+        +1000 HU = bone (not relevant here)
+
+    Args:
+        img_hu (np.ndarray): Raw CT volume in Hounsfield Units.
+
+    Returns:
+        np.ndarray: float32 volume with values in [0.0, 1.0].
+    """
+    windowed = np.clip(img_hu, HU_MIN, HU_MAX)
+    normalized = (windowed - HU_MIN) / (HU_MAX - HU_MIN)
     return normalized.astype(np.float32)
 
-def crop_and_resize_slice(slice_img, slice_lbl, target_size=None):
-    """
-    Redimensionează felia CT 2D și masca corespunzătoare la dimensiunea țintă (ex: 192x192).
-    """
-    # 1. Dacă nu este specificată nicio dimensiune, o luăm din configurație
-    if target_size is None:
-        target_size = config.CONFIG["patch_size"]
-        
-    from scipy.ndimage import zoom
-    
-    # 2. Obținem dimensiunea curentă (h, w) a feliei
-    h, w = slice_img.shape
-    
-    # 3. Dacă dimensiunea feliei este deja egală cu cea țintă, o returnăm direct
-    if (h, w) == target_size:
-        return slice_img, slice_lbl
-        
-    # 4. Calculăm factorii de scalare/zoom pe fiecare axă
-    zoom_factors = (target_size[0] / h, target_size[1] / w)
-    
-    # 5. Redimensionăm imaginea CT folosind interpolare biliniară (order=1)
-    resized_img = zoom(slice_img, zoom_factors, order=1, prefilter=False)
-    
-    # 6. Redimensionăm masca folosind interpolare cel mai apropiat vecin (order=0) pentru a păstra valorile binare
-    resized_lbl = zoom(slice_lbl, zoom_factors, order=0, prefilter=False)
-    
-    # 7. Asigurăm binarizarea strictă a măștii (0 sau 1)
-    resized_lbl = (resized_lbl > 0.5).astype(np.uint8)
-    
-    return resized_img, resized_lbl
 
-def preprocess_and_slice_all():
+def verify_case(case_id, img_nii, lbl_nii, img_data, lbl_data):
     """
-    Taie volumele CT 3D în felii axiale 2D, aplică ferestruirea HU, le redimensionează 
-    și le salvează ca array-uri NumPy (.npy). Implementează un raport 1:1 de balancing între felii cu tumoare și felii sănătoase.
+    Runs the per-case integrity checks required before a volume may enter the
+    dataset.
+
+    Checks shape agreement, affine agreement, orientation agreement, label value
+    domain, NaN/Inf contamination, and empty volumes or masks.
+
+    Args:
+        case_id (str): Patient identifier.
+        img_nii, lbl_nii: nibabel image objects for image and label.
+        img_data, lbl_data (np.ndarray): Their raw voxel arrays.
+
+    Returns:
+        tuple: (checks_dict, list_of_problem_strings)
     """
-    # 1. Obținem split-ul pacienților și folderul de ieșire
-    split = create_patient_split()
-    preprocessed_dir = get_preprocessed_dir()
-    
-    # 2. Creăm subdirectoarele pentru imaginile și etichetele de train și val
-    for mode in ["train", "val"]:
-        os.makedirs(os.path.join(preprocessed_dir, mode, "images"), exist_ok=True)
-        os.makedirs(os.path.join(preprocessed_dir, mode, "labels"), exist_ok=True)
-        
-    # 3. Deschidem dataset.json
-    dataset_json_path = os.path.join(config.DATA_DIR, "dataset.json")
-    with open(dataset_json_path, 'r') as f:
+    from nibabel.orientations import aff2axcodes
+
+    problems = []
+
+    shape_match = tuple(img_nii.shape) == tuple(lbl_nii.shape)
+    if not shape_match:
+        problems.append(f"shape mismatch {img_nii.shape} vs {lbl_nii.shape}")
+
+    affine_diff = float(np.abs(img_nii.affine - lbl_nii.affine).max())
+    if affine_diff > 1e-4:
+        problems.append(f"affine mismatch (max diff {affine_diff:.2e})")
+
+    img_axcodes = "".join(aff2axcodes(img_nii.affine))
+    lbl_axcodes = "".join(aff2axcodes(lbl_nii.affine))
+    if img_axcodes != lbl_axcodes:
+        problems.append(f"orientation mismatch {img_axcodes} vs {lbl_axcodes}")
+
+    label_values = np.unique(lbl_data)
+    if not np.all(np.isin(label_values, [0, 1])):
+        problems.append(f"label values outside {{0,1}}: {label_values[:10]}")
+
+    if not np.isfinite(img_data).all():
+        problems.append("image contains NaN or Inf")
+    if not np.isfinite(lbl_data).all():
+        problems.append("label contains NaN or Inf")
+
+    if float(img_data.std()) == 0.0:
+        problems.append("image volume is constant (empty)")
+
+    n_tumor_voxels = int((lbl_data > 0.5).sum())
+    if n_tumor_voxels == 0:
+        problems.append("label mask is empty")
+
+    checks = {
+        "shape_match": shape_match,
+        "affine_max_diff": affine_diff,
+        "orientation": img_axcodes,
+        "label_values": [float(v) for v in label_values[:5]],
+        "n_tumor_voxels_original": n_tumor_voxels,
+    }
+    return checks, problems
+
+
+def preprocess_case(case_id, img_path, lbl_path, run_qc=True):
+    """
+    Runs the full forward preprocessing pipeline for one patient.
+
+    Args:
+        case_id (str): Patient identifier.
+        img_path, lbl_path (str): Paths to the NIfTI image and label.
+        run_qc (bool): Whether to run the reconstruction round-trip. It costs
+            roughly 30 seconds per patient because it resamples the full volume
+            back to original resolution, but it is what catches geometry bugs.
+
+    Returns:
+        tuple: (img_stack, lbl_stack, metadata, qc)
+            img_stack (np.ndarray): float16 (192, 192, D) normalized CT slices.
+            lbl_stack (np.ndarray): uint8 (192, 192, D) binary masks.
+            metadata (dict): everything needed to invert the pipeline.
+            qc (dict): quality-control measurements for this case.
+    """
+    img_nii = nib.load(img_path)
+    lbl_nii = nib.load(lbl_path)
+
+    original_affine = img_nii.affine.copy()
+    original_shape = tuple(img_nii.shape)
+    original_spacing = tuple(float(z) for z in img_nii.header.get_zooms()[:3])
+
+    img_hu = np.asanyarray(img_nii.dataobj).astype(np.float32)
+    lbl_raw = np.asanyarray(lbl_nii.dataobj).astype(np.float32)
+
+    checks, problems = verify_case(case_id, img_nii, lbl_nii, img_hu, lbl_raw)
+
+    # --- Step 1: reorient to canonical RAS, recording the exact transform ---
+    ornt = get_ornt(original_affine)
+    img_hu = reorient_to_canonical(img_hu, ornt)
+    lbl_raw = reorient_to_canonical(lbl_raw, ornt)
+    canonical_shape = tuple(img_hu.shape)
+    canonical_spacing = permute_spacing(original_spacing, ornt)
+
+    # --- Step 2: resample to 1mm isotropic ---
+    # Trilinear for CT intensities, nearest-neighbour for the binary mask.
+    img_hu = resample_volume(img_hu, canonical_spacing, TARGET_SPACING, order=1)
+    lbl_res = resample_volume(lbl_raw, canonical_spacing, TARGET_SPACING, order=0)
+    lbl_res = (lbl_res > 0.5).astype(np.uint8)
+    resampled_shape = tuple(img_hu.shape)
+
+    # --- Step 3: crop to the body bounding box (thresholded in HU) ---
+    crop_bbox = crop_body_3d(img_hu, margin=5)
+    img_hu = apply_crop(img_hu, crop_bbox)
+    lbl_crop = apply_crop(lbl_res, crop_bbox)
+    cropped_shape = tuple(img_hu.shape)
+
+    n_tumor_voxels_cropped = int(lbl_crop.sum())
+    n_pos_slices_before_resize = int((lbl_crop.sum(axis=(0, 1)) > 0).sum())
+
+    # --- Step 4: HU windowing and normalization to [0, 1] ---
+    img_norm = apply_hu_windowing(img_hu)
+    del img_hu
+
+    # --- Step 5: resize every axial slice to 192x192 ---
+    n_slices = cropped_shape[2]
+    img_stack = np.zeros((*TARGET_SLICE_SIZE, n_slices), dtype=np.float16)
+    lbl_stack = np.zeros((*TARGET_SLICE_SIZE, n_slices), dtype=np.uint8)
+
+    for s in range(n_slices):
+        img_stack[:, :, s] = resize_slice_2d(
+            img_norm[:, :, s], TARGET_SLICE_SIZE, order=1).astype(np.float16)
+        resized_lbl = resize_slice_2d(
+            lbl_crop[:, :, s].astype(np.float32), TARGET_SLICE_SIZE, order=1)
+        lbl_stack[:, :, s] = (resized_lbl > 0.5).astype(np.uint8)
+
+    # Per-slice bookkeeping used later for sampling
+    pos_per_slice = lbl_stack.sum(axis=(0, 1))
+    positive_indices = [int(i) for i in np.where(pos_per_slice > 0)[0]]
+    slice_mean = img_stack.astype(np.float32).mean(axis=(0, 1))
+    body_indices = [int(i) for i in np.where(slice_mean > BODY_SLICE_MIN_MEAN)[0]]
+
+    metadata = {
+        "case_id": case_id,
+        "original_affine": original_affine.tolist(),
+        "original_shape": list(original_shape),
+        "original_spacing": list(original_spacing),
+        "ornt": np.asarray(ornt).tolist(),
+        "canonical_shape": list(canonical_shape),
+        "canonical_spacing": list(canonical_spacing),
+        "target_spacing": list(TARGET_SPACING),
+        "resampled_shape": list(resampled_shape),
+        "crop_bbox": crop_bbox,
+        "cropped_shape": list(cropped_shape),
+        "target_slice_size": list(TARGET_SLICE_SIZE),
+        "hu_min": HU_MIN,
+        "hu_max": HU_MAX,
+    }
+
+    # --- Step 6: quality control -------------------------------------------
+    # Push the preprocessed label back through the full inverse chain and
+    # compare against the untouched original mask. This is the accuracy ceiling
+    # imposed by preprocessing alone, and it is also a live assertion that the
+    # geometry inverse is correct.
+    gt_original = (np.asanyarray(lbl_nii.dataobj) > 0.5).astype(np.uint8)
+    voxel_mm3 = float(np.prod(original_spacing))
+    original_volume_mm3 = float(gt_original.sum() * voxel_mm3)
+    n_pos_slices_original = int((gt_original.sum(axis=(0, 1)) > 0).sum())
+
+    if run_qc:
+        lbl_reconstructed = reconstruct_to_original_geometry(
+            lbl_stack.astype(np.float32), metadata, threshold=0.5)
+
+        inter = int(np.logical_and(lbl_reconstructed > 0, gt_original > 0).sum())
+        denom = int((lbl_reconstructed > 0).sum() + (gt_original > 0).sum())
+        roundtrip_dice = float(2.0 * inter / denom) if denom > 0 else 1.0
+        reconstructed_volume_mm3 = float(lbl_reconstructed.sum() * voxel_mm3)
+    else:
+        roundtrip_dice = float("nan")
+        reconstructed_volume_mm3 = float("nan")
+
+    qc = {
+        "case_id": case_id,
+        "orientation": checks["orientation"],
+        "shape_match": checks["shape_match"],
+        "affine_max_diff": checks["affine_max_diff"],
+        "original_shape": "x".join(str(s) for s in original_shape),
+        "original_spacing": "x".join(f"{s:.3f}" for s in original_spacing),
+        "resampled_shape": "x".join(str(s) for s in resampled_shape),
+        "cropped_shape": "x".join(str(s) for s in cropped_shape),
+        "crop_retained_pct": round(
+            100.0 * float(np.prod(cropped_shape)) / float(np.prod(resampled_shape)), 2),
+        "n_slices_kept": n_slices,
+        "n_tumor_voxels_original": checks["n_tumor_voxels_original"],
+        "n_tumor_voxels_cropped": n_tumor_voxels_cropped,
+        "n_pos_slices_original": n_pos_slices_original,
+        "n_pos_slices_before_resize": n_pos_slices_before_resize,
+        "n_pos_slices_after_resize": len(positive_indices),
+        "pos_slices_lost_to_resize": n_pos_slices_before_resize - len(positive_indices),
+        "tumor_volume_original_mm3": round(original_volume_mm3, 2),
+        "tumor_volume_reconstructed_mm3": round(reconstructed_volume_mm3, 2),
+        "tumor_volume_change_pct": round(
+            100.0 * (reconstructed_volume_mm3 - original_volume_mm3) / original_volume_mm3, 3
+        ) if original_volume_mm3 > 0 else 0.0,
+        "roundtrip_dice": round(roundtrip_dice, 4),
+        "problems": "; ".join(problems) if problems else "",
+    }
+
+    return img_stack, lbl_stack, metadata, qc
+
+
+def preprocess_all(run_qc=True):
+    """
+    Runs preprocessing over every patient in the dataset, writing:
+        output/preprocessed/volumes/{case_id}_img.npy   float16 (192,192,D)
+        output/preprocessed/volumes/{case_id}_lbl.npy   uint8   (192,192,D)
+        output/preprocessed/index.json                  split + slice index
+        output/metadata/{case_id}.json                  reconstruction metadata
+        output/preprocessing_qc.csv                     per-case QC measurements
+
+    Args:
+        run_qc (bool): Whether to measure the reconstruction round-trip for every
+            patient. Adds roughly 30-50 seconds per case (about 40 minutes for
+            the full dataset) and is what verifies the geometry inverse.
+    """
+    print("=== ANATOMICALLY-CORRECT PREPROCESSING PIPELINE ===\n")
+    if not run_qc:
+        print("[!] QC round-trip disabled. Geometry errors will not be detected.\n")
+
+    clean_preprocessed_directory()
+
+    split = load_patient_split()
+    split_of = {}
+    for mode in ("train", "val", "test"):
+        for case_id in split[mode]:
+            split_of[case_id] = mode
+
+    volumes_dir = get_volumes_dir()
+    os.makedirs(volumes_dir, exist_ok=True)
+    os.makedirs(get_metadata_dir(), exist_ok=True)
+
+    with open(os.path.join(DATA_DIR, "dataset.json"), "r") as f:
         dataset_info = json.load(f)
-        
     training_cases = dataset_info["training"]
-    
-    print("=== PREPROCESSING ALL CT VOLUMES & EXTRACTING 2D SLICES ===")
-    
-    # 4. Procesăm fiecare volum CT pacient cu pacient
-    for case in tqdm(training_cases, desc="Processing cases"):
-        img_rel = case["image"]
-        lbl_rel = case["label"]
-        case_name = os.path.basename(img_rel).replace(".gz", "")
-        
-        # 5. Determinăm dacă pacientul aparține setului de train sau val
-        mode = "train" if case_name in split["train"] else "val"
-        
-        try:
-            # Rezolvăm căile fișierelor NIfTI
-            img_path = resolve_nifti_path(img_rel)
-            lbl_path = resolve_nifti_path(lbl_rel)
-            
-            # Încărcăm obiectele NIfTI
-            img = nib.load(img_path)
-            lbl = nib.load(lbl_path)
-            
-            # Extragem matricele 3D ca numpy arrays
-            img_data = np.asanyarray(img.dataobj)
-            lbl_data = np.asanyarray(lbl.dataobj)
-            
-            # Aplicăm ferestruirea pulmonară Hounsfield [-1000, 400] HU
-            normalized_img = apply_lung_window(img_data)
-            num_slices = normalized_img.shape[2]
-            
-            # Colectăm indecșii feliilor cu tumoare și ai celor fără tumoare
-            positive_slice_indices = []
-            negative_slice_indices = []
-            
-            for s in range(num_slices):
-                if np.sum(lbl_data[:, :, s] == 1) > 0:
-                    # Felia conține cel puțin 1 pixel de tumoare
-                    positive_slice_indices.append(s)
-                else:
-                    # Felia nu are tumoare, dar filtrăm feliile goale din afara corpului (aer complet)
-                    if np.mean(normalized_img[:, :, s]) > 0.1:
-                        negative_slice_indices.append(s)
-            
-            # 6. Egalizăm numărul de felii negative pentru a echilibra setul de date (Balancing 1:1)
-            if mode == "train":
-                num_negatives_to_keep = len(positive_slice_indices)
-            else:
-                num_negatives_to_keep = len(positive_slice_indices) * 2
-                
-            sampled_negatives = []
-            if negative_slice_indices and num_negatives_to_keep > 0:
-                state = random.getstate()
-                random.seed(config.CONFIG["seed"])
-                sampled_negatives = random.sample(
-                    negative_slice_indices, 
-                    min(len(negative_slice_indices), num_negatives_to_keep)
-                )
-                random.setstate(state)
-                
-            # Combinăm feliile pozitive cu cele negative eșantionate
-            slices_to_save = positive_slice_indices + sampled_negatives
-            
-            # 7. Salvăm feliile individuale ca fișiere .npy
-            for s in slices_to_save:
-                slice_img = normalized_img[:, :, s]
-                slice_lbl = lbl_data[:, :, s]
-                
-                # Redimensionăm la 192x192
-                resized_img, resized_lbl = crop_and_resize_slice(slice_img, slice_lbl)
-                
-                img_save_path = os.path.join(preprocessed_dir, mode, "images", f"{case_name}_slice_{s}.npy")
-                lbl_save_path = os.path.join(preprocessed_dir, mode, "labels", f"{case_name}_slice_{s}.npy")
-                
-                # Salvăm matricele pe disc
-                np.save(img_save_path, resized_img.astype(np.float32))
-                np.save(lbl_save_path, resized_lbl.astype(np.uint8))
-                
-        except Exception as e:
-            print(f"Error preprocessing case {case_name}: {e}")
-            
-    print(f"Preprocessed slices saved successfully to: {preprocessed_dir}")
 
-# Punctul de intrare pentru rulare din linia de comandă
+    index = {
+        "target_slice_size": list(TARGET_SLICE_SIZE),
+        "target_spacing": list(TARGET_SPACING),
+        "hu_window": [HU_MIN, HU_MAX],
+        "splits": {"train": [], "val": [], "test": []},
+        "cases": {},
+    }
+    qc_records = []
+
+    print(f"Processing {len(training_cases)} CT volumes...\n")
+
+    for case in tqdm(training_cases, desc="Preprocessing"):
+        case_id = os.path.basename(case["image"]).replace(".nii.gz", "").replace(".nii", "")
+
+        mode = split_of.get(case_id)
+        if mode is None:
+            print(f"  [WARNING] {case_id} is in no split, skipping.")
+            continue
+
+        try:
+            img_stack, lbl_stack, metadata, qc = preprocess_case(
+                case_id,
+                resolve_nifti_path(case["image"]),
+                resolve_nifti_path(case["label"]),
+                run_qc=run_qc,
+            )
+        except Exception as e:
+            print(f"\n  [ERROR] {case_id} failed: {e}")
+            continue
+
+        if qc["problems"]:
+            print(f"\n  [QC] {case_id}: {qc['problems']}")
+        if qc["roundtrip_dice"] < 0.80:
+            print(f"\n  [QC] {case_id}: round-trip Dice is only "
+                  f"{qc['roundtrip_dice']:.4f} — geometry may be wrong.")
+
+        np.save(os.path.join(volumes_dir, f"{case_id}_img.npy"), img_stack)
+        np.save(os.path.join(volumes_dir, f"{case_id}_lbl.npy"), lbl_stack)
+
+        with open(os.path.join(get_metadata_dir(), f"{case_id}.json"), "w") as f:
+            json.dump(metadata, f, indent=4)
+
+        pos_per_slice = lbl_stack.sum(axis=(0, 1))
+        positive_indices = [int(i) for i in np.where(pos_per_slice > 0)[0]]
+        slice_mean = img_stack.astype(np.float32).mean(axis=(0, 1))
+        body_indices = [int(i) for i in np.where(slice_mean > BODY_SLICE_MIN_MEAN)[0]]
+
+        index["splits"][mode].append(case_id)
+        index["cases"][case_id] = {
+            "split": mode,
+            "n_slices": int(lbl_stack.shape[2]),
+            "positive_slices": positive_indices,
+            "body_slices": body_indices,
+            "tumor_voxels": int(lbl_stack.sum()),
+        }
+        qc_records.append(qc)
+
+    with open(os.path.join(get_preprocessed_dir(), "index.json"), "w") as f:
+        json.dump(index, f, indent=2)
+
+    qc_path = os.path.join(OUTPUT_DIR, "preprocessing_qc.csv")
+    if qc_records:
+        with open(qc_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(qc_records[0].keys()))
+            writer.writeheader()
+            writer.writerows(qc_records)
+
+    _print_summary(index, qc_records, qc_path)
+
+
+def _print_summary(index, qc_records, qc_path):
+    """Prints the preprocessing summary and the accuracy ceiling it implies."""
+    print("\n" + "=" * 72)
+    print("        PREPROCESSING SUMMARY")
+    print("=" * 72)
+
+    for mode in ("train", "val", "test"):
+        cases = index["splits"][mode]
+        total = sum(index["cases"][c]["n_slices"] for c in cases)
+        pos = sum(len(index["cases"][c]["positive_slices"]) for c in cases)
+        pct = (100.0 * pos / total) if total else 0.0
+        print(f"  {mode.upper():6s}: {len(cases):2d} patients | {total:6d} slices "
+              f"| {pos:5d} positive ({pct:.2f}%)")
+
+    print("\n  All splits store every slice. Positive/negative balancing is a")
+    print("  training-time sampling choice, so validation and test keep the")
+    print("  real class distribution.")
+
+    if qc_records:
+        dices = [q["roundtrip_dice"] for q in qc_records
+                 if not np.isnan(q["roundtrip_dice"])]
+        lost = sum(q["pos_slices_lost_to_resize"] for q in qc_records)
+        affected = sum(1 for q in qc_records if q["pos_slices_lost_to_resize"] > 0)
+        vol_change = [q["tumor_volume_change_pct"] for q in qc_records
+                      if not np.isnan(q["tumor_volume_change_pct"])]
+        retained = [q["crop_retained_pct"] for q in qc_records]
+
+        print("\n  --- Preprocessing cost (the ceiling no model can beat) ---")
+        if dices:
+            print(f"  Round-trip Dice:        mean {np.mean(dices):.4f} | "
+                  f"min {np.min(dices):.4f} | max {np.max(dices):.4f}")
+        print(f"  Positive slices lost:   {lost} across {affected} patients")
+        if vol_change:
+            print(f"  Tumor volume change:    mean {np.mean(vol_change):+.2f}%")
+        print(f"  Volume kept after crop: mean {np.mean(retained):.1f}%")
+        print(f"\n  QC report: {qc_path}")
+
+        if dices and np.min(dices) < 0.80:
+            print("\n  [!] At least one case has a low round-trip Dice. That is a")
+            print("      geometry bug, not a data property — investigate before training.")
+
+    print("=" * 72)
+
+
 if __name__ == "__main__":
-    preprocess_and_slice_all()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Preprocess the Decathlon Lung dataset into 2D slice stacks")
+    parser.add_argument("--skip_qc", action="store_true",
+                        help="Skip the reconstruction round-trip check (much "
+                             "faster, but geometry errors go undetected)")
+    args = parser.parse_args()
+
+    preprocess_all(run_qc=not args.skip_qc)

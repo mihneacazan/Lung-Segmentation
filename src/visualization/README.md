@@ -1,59 +1,102 @@
-# Stage 6: Interactive Web Visualization Apps
+# Visualization
 
-This directory contains the interactive web visualization applications built using Streamlit.
+Three tools with different jobs: one runs as part of the pipeline and writes
+figures to disk, the other two are interactive browsers — one for the raw scans,
+one for what a trained model does to them.
 
----
-
-## 📄 File Overview
-
-* **`visualizer.py`**: Interactive CT volume browser with Hounsfield window presets and mask overlays.
-* **`prediction_viewer.py`**: Side-by-side comparison of model predictions vs ground truth masks.
-
----
-
-## 🔍 Code Walkthrough & Design Motivations
-
-### visualizer.py — CT Volume Explorer
-
-#### 1. Interactive Slice Navigation
-* **Implementation:** Reads 3D NIfTI volumes dynamically and provides a slider to navigate along the Z-axis (axial slices).
-* **Motivation:** Allows researchers and clinicians to visually inspect tumor boundaries across the full 3D extent of the lungs.
-
-#### 2. Presets for Hounsfield Unit Windowing
-* **Implementation:** Provides interactive radio options for:
-  * **Lung Window:** $[-1000, 400]$ HU (optimal for lung parenchyma).
-  * **Mediastinum Window:** $[-150, 250]$ HU (optimal for soft tissue).
-  * **Full Raw Range:** Unclipped raw values.
-* **Motivation:** Mimics clinical PACS workstations where radiologists switch windowing presets to evaluate different anatomical structures.
-
-#### 3. Tumor Slice Auto-Detection & Quick Jump
-* **Implementation:** Scans ground truth masks to find positive slice indices and provides a quick-jump selector directly to tumor slices.
-* **Motivation:** Saves time by jumping straight to slices containing tumor nodules instead of manually scrolling through hundreds of empty slices.
+| File | Type | Job |
+|---|---|---|
+| `overlay_check.py` | Script, part of the pipeline | Verifies image/mask alignment after preprocessing |
+| `visualizer.py` | Streamlit app, manual use | Browses raw NIfTI volumes with clinical HU presets |
+| `prediction_viewer.py` | Streamlit app, manual use | Compares a checkpoint's prediction against ground truth |
 
 ---
 
-### prediction_viewer.py — Model Evaluation Dashboard
+## overlay_check.py
 
-#### 1. Four-Panel Comparison View
-* **Implementation:** Displays side-by-side panels showing:
-  1. **CT Slice** (grayscale input)
-  2. **Ground Truth Mask** (green overlay with lime contours)
-  3. **Predicted Mask** (red overlay with red contours)
-  4. **Overlay Comparison** (Green=GT, Red=Prediction, Yellow=Overlap)
-* **Motivation:** Enables instant visual diagnosis of model behavior: false positives (red-only), false negatives (green-only), and correct detections (yellow overlap).
+Samples slices from the preprocessed volumes and draws the CT slice with its mask
+overlaid, one figure per split:
 
-#### 2. Per-Slice Dice Score
-* **Implementation:** Computes Dice coefficient for each individual validation slice and color-codes it (green ≥0.7, orange ≥0.3, red <0.3).
-* **Motivation:** Identifies which anatomical patterns or slice positions the model struggles with.
+```bash
+python -m src.visualization.overlay_check
+```
 
-#### 3. Raw Probability Heatmap
-* **Implementation:** Shows the continuous sigmoid probability output (0.0–1.0) as a hot colormap.
-* **Motivation:** Reveals whether the model is "almost correct" (probabilities near threshold) or completely uncertain, guiding threshold tuning.
+Writes `output/eda_figures/overlay_train.png`, `overlay_val.png`,
+`overlay_test.png`.
 
-#### 4. Adjustable Binarization Threshold
-* **Implementation:** Slider to adjust the probability threshold (default 0.5) for converting soft predictions to binary masks.
-* **Motivation:** Allows exploring precision-recall tradeoffs without retraining.
+**Why this exists as a pipeline step, not an afterthought.** A misaligned mask —
+off by a flip, a transposed axis, or a resampling that moved image and label
+differently — produces a preprocessed dataset that looks entirely normal in every
+numeric check, and trains a model that can never work. The numeric guard against
+this is the round-trip Dice in `output/preprocessing_qc.csv`; this is the visual
+one, and the two fail in different ways, which is why both are kept.
 
-#### 5. Batch Dice Summary Table
-* **Implementation:** Computes and displays Dice scores for ALL validation slices in a sortable table, with separate means for tumor-positive and tumor-negative slices.
-* **Motivation:** Provides aggregate model performance metrics at a glance.
+Slices are sampled across several patients rather than all from one, so a single
+unlucky volume cannot make the whole split look fine.
+
+---
+
+## visualizer.py
+
+An interactive Streamlit browser for the **raw** archive — it reads NIfTI files
+directly and does not depend on anything the pipeline produces:
+
+```bash
+streamlit run src/visualization/visualizer.py
+```
+
+- Z-axis slider through the axial stack, with ground-truth mask overlay.
+- Hounsfield window presets: lung [−1000, 400], mediastinum [−150, 250], and the
+  unclipped raw range — the same presets a radiologist switches between on a PACS
+  workstation.
+- Jump-to-tumour selector built from the positive slice indices, so inspecting a
+  lesion does not mean scrolling through 300 empty slices.
+
+Useful for sanity-checking a specific patient by eye — for example the test cases
+that score Dice 0.0, where the question is whether the anatomy is unusual or the
+prediction simply missed.
+
+---
+
+## prediction_viewer.py
+
+```bash
+streamlit run src/visualization/prediction_viewer.py
+```
+
+Loads any checkpoint under `output/experiments/`, runs inference on the selected
+patient, and draws the CT with ground truth in red and the prediction in blue.
+The repository ships with every experiment's checkpoint already in place, so no
+setup beyond the raw archive is needed before running this.
+
+**The prediction is reconstructed into the patient's original NIfTI geometry
+before anything is drawn.** Working in the 192×192 preprocessed space would be
+far cheaper, but the numbers in `benchmark_report.json` are computed in original
+geometry against a ground truth read straight from the source archive — so a
+viewer in preprocessed space would show a different object than the one that was
+scored, and a disagreement between the two would be impossible to interpret. The
+Dice above the image is the same Dice as in the CSV, and the app shows the delta
+against the reported value to prove it.
+
+- **Cases are sorted worst-first** when the split has a scored CSV, so the
+  failures are at the top of the selector rather than buried alphabetically.
+- **Jump targets** — largest tumour, best match, largest miss, largest false
+  positive. Reaching the informative slice should not require dragging a slider
+  through 300 of them.
+- **Z-axis profile** below the image plots ground-truth and predicted voxel
+  counts per slice. This is the fastest way to read a Dice of 0.0: if the two
+  areas do not overlap at all, the model is segmenting something else. `lung_036`
+  is the example — ground truth in slices 88–101, prediction in 132–196, zero
+  shared slices under every one of the eight checkpoints.
+- **Threshold slider** starts at the value the run chose on validation, so moving
+  it shows what that choice bought.
+
+Surface metrics are behind a checkbox because they are slow: on a 512×512×271
+volume HD95 costs about 44 s, ASD 38 s, and the false-positive component count
+19 s, against 8 s for the whole overlap set. For the reported threshold they are
+already in `test_results_per_patient.csv`; compute them here only after moving
+the threshold or enabling the component filter.
+
+Inference itself is not the bottleneck — about 4 s per patient on CPU for the
+1.6M-parameter models. The geometry round-trip is roughly 7 s. Results are cached
+per (run, patient, threshold), so only the first view of a combination waits.

@@ -1,0 +1,19 @@
+{
+    "exp_name": "tversky_b06",
+    "seed": 42,
+    "epochs": 100,
+    "batch_size": 16,
+    "lr": 0.001,
+    "model_type": "unet",
+    "loss_type": "tversky",
+    "augment": "anatomic",
+    "sampling": "all",
+    "n_adjacent": 1,
+    "patience": 20,
+    "min_epochs": 15,
+    "lr_t_max": 50,
+    "max_grad_norm": 1.0,
+    "postproc_min_fraction": 0.1,
+    "tversky_alpha": 0.4,
+    "tversky_beta": 0.6
+}

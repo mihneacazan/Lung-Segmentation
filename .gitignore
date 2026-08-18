@@ -2,27 +2,44 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
 
 # Virtual Environment
 venv/
 ENV/
 env/
 
-# Large Raw Data & Preprocessed Slices
-archive/
+# Raw dataset: 31 GB of NIfTI volumes, individually over GitHub's 100 MB
+# file limit. Only the manifest is committed, as a reference for the layout
+# src/config.py expects; see README.md for where to download the rest.
+archive/*
+!archive/dataset.json
+
+# Derived data that regenerates from the raw archive + code, so committing it
+# would just be a second, driftable copy of something reproducible.
 output/preprocessed/
-output/*.pth
-output/*.csv.bak
-*.zip
+output/results.zip
 
-# Local-only Files (Not for GitHub)
-requirements.txt
-task.md
-docs/implementation_plan.md
-docs/kaggle_guide.md
+# Working files not part of the published project: personal notes, Kaggle
+# notebook drafts and their logs, downloaded result archives already unpacked
+# into output/experiments/, and Radu's review (addressed to him, not public).
+Stages.md
+Readme_Radu.md
+Review_Radu.md
+docs/
+kaggle_notebooks/
+kaggle_upload/
+full-experiments*.ipynb
+*.log
+params.txt
+download.txt
+archive.zip
+all_experiments.zip
+results_*.zip
 
-# Editors & OS artifacts
+# Editors, IDE assistants & OS artifacts
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
