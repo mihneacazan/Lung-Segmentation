@@ -121,7 +121,7 @@ def evaluate_fast(model, dataloader, device, threshold=0.5):
 #  PREDICTION COLLECTION
 # ============================================================================
 
-def collect_predictions(model, dataloader, device):
+def collect_predictions(model, dataloader, device, sw_roi=None, sw_overlap=0.5):
     """
     Runs inference over a split, returning per-patient probability and
     ground-truth slice stacks plus wall-clock inference time per patient.
@@ -130,10 +130,45 @@ def collect_predictions(model, dataloader, device):
     230 MB that way against 460 MB in float32, and the extra precision is
     irrelevant to a threshold comparison.
 
+    With `sw_roi` set, the slice is covered by overlapping windows of that size
+    and the per-window predictions are blended back into a full-size map. This
+    exists for models trained on a window rather than a whole slice: a network
+    only ever shown 96 px of context behaves differently when handed 192, and
+    the effect is severe for the normalization layers that derive their
+    statistics from the input itself. Tiling restores the field of view the model
+    was trained under.
+
+    Nothing about it consults the ground truth — window positions come from a
+    fixed grid over the image, every pixel is covered, and the procedure runs
+    identically on a patient with no annotation. It is the standard inference
+    path for patch-trained segmentation networks.
+
+    Windows are averaged in **probability** space, not logit space, and weighted
+    with a Gaussian toward their centre so that predictions made at a window edge,
+    where the model saw the least context, count for less than those made at the
+    middle.
+
+    Args:
+        sw_roi (int|None): Window side length, or None for whole-slice inference.
+        sw_overlap (float): Fraction of overlap between neighbouring windows.
+
     Returns:
         tuple: (probs, labels, inference_times), each keyed by case_id.
     """
     model.eval()
+
+    if sw_roi is not None:
+        from monai.inferers import sliding_window_inference
+
+        def infer(x):
+            return sliding_window_inference(
+                x, roi_size=(sw_roi, sw_roi), sw_batch_size=8,
+                predictor=lambda w: torch.sigmoid(model(w)),
+                overlap=sw_overlap, mode="gaussian")
+    else:
+        def infer(x):
+            return torch.sigmoid(model(x))
+
     probs = defaultdict(dict)
     labels = defaultdict(dict)
     times = defaultdict(float)
@@ -145,7 +180,7 @@ def collect_predictions(model, dataloader, device):
             if device.type == "cuda":
                 torch.cuda.synchronize()
             start = time.perf_counter()
-            out = torch.sigmoid(model(images))
+            out = infer(images)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - start
@@ -169,7 +204,8 @@ def collect_predictions(model, dataloader, device):
 # ============================================================================
 
 def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
-                  save_nifti_dir=None, postproc_min_fraction=0.10):
+                  save_nifti_dir=None, postproc_min_fraction=0.10,
+                  surface_metrics=True):
     """
     Reconstructs each patient's prediction into their original NIfTI geometry and
     computes the full metric set against the untouched ground-truth mask.
@@ -195,6 +231,8 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
             the patient's original affine.
         postproc_min_fraction (float): Component-size cutoff as a fraction of the
             largest component. 0 skips the post-processed metric set entirely.
+        surface_metrics (bool): False skips HD95 and ASD, which dominate the cost
+            of an evaluation. Use it for comparisons decided on overlap.
 
     Returns:
         tuple: (patient_metrics, patient_pred_masks, patient_gt_masks, pp_micro)
@@ -227,7 +265,8 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
         gt_3d = (np.asanyarray(nib.load(gt_path).dataobj) > 0.5).astype(np.uint8)
         spacing = tuple(metadata["original_spacing"])
 
-        metrics = compute_all_3d_metrics(pred_3d, gt_3d, spacing)
+        metrics = compute_all_3d_metrics(pred_3d, gt_3d, spacing,
+                                         surface_metrics=surface_metrics)
         metrics["inference_time_sec"] = inference_times.get(case_id, 0.0)
         metrics["gt_empty"] = bool(gt_3d.sum() == 0)
         metrics["pred_empty"] = bool(pred_3d.sum() == 0)
@@ -235,7 +274,8 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
         if postproc_min_fraction:
             pred_pp, n_removed = filter_predicted_components(
                 pred_3d, min_fraction=postproc_min_fraction)
-            pp_metrics = compute_all_3d_metrics(pred_pp, gt_3d, spacing)
+            pp_metrics = compute_all_3d_metrics(pred_pp, gt_3d, spacing,
+                                                surface_metrics=surface_metrics)
             for key, value in pp_metrics.items():
                 metrics[f"pp_{key}"] = value
             metrics["pp_components_removed"] = n_removed
@@ -363,6 +403,14 @@ def main():
     parser.add_argument("--model_type", type=str, default=None, choices=MODEL_TYPES,
                         help="Defaults to the value in the checkpoint's config.json")
     parser.add_argument("--n_adjacent", type=int, default=None, choices=[1, 3, 5])
+    parser.add_argument("--sw_roi", type=int, default=None,
+                        help="Tile each slice with overlapping windows of this "
+                             "size instead of predicting it whole. Use it to "
+                             "match the field of view a window-trained model "
+                             "(--crop tumor) saw during training. Uses no ground "
+                             "truth: the grid is fixed and covers every pixel.")
+    parser.add_argument("--sw_overlap", type=float, default=0.5,
+                        help="Overlap fraction between neighbouring windows.")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--save_nifti", action="store_true")
@@ -414,7 +462,9 @@ def main():
     print(f"\nRunning inference on '{args.split}' "
           f"({len(datasets[args.split])} slices, "
           f"{len(index['splits'][args.split])} patients)...")
-    probs, labels, times = collect_predictions(model, loaders[args.split], device)
+    probs, labels, times = collect_predictions(
+        model, loaders[args.split], device,
+        sw_roi=args.sw_roi, sw_overlap=args.sw_overlap)
 
     threshold = args.threshold
     if args.sweep_threshold:

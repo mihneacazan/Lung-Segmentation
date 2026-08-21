@@ -9,10 +9,10 @@ occupy well under 1% of a volume, which is what makes the task hard and what mos
 of the design decisions below are responding to.
 
 **Best configuration: 2D U-Net, DiceCE loss, every slice, anatomically valid
-augmentation — Dice 0.4853 ± 0.0153 over three seeds.** Fourteen configurations
+augmentation — Dice 0.4853 ± 0.0153 over three seeds.** 21 configurations
 were compared under identical conditions. The two effects that mattered were the
 slice sampling strategy (+0.18 Dice) and the augmentation policy (+0.22); the
-choice of architecture trailed far behind both, and at ten test patients the
+choice of architecture trailed far behind both, and at 10 test patients the
 alternatives to the baseline U-Net were not statistically separable from it.
 
 ---
@@ -55,7 +55,7 @@ python -m src.eda.eda_report                  # dataset audit and statistics
 python -m src.preprocessing.create_split      # deterministic 44 / 9 / 10 patient split
 python -m src.preprocessing.preprocessing     # ~40 min, includes geometry QC
 python -m src.visualization.overlay_check     # visual image/mask alignment check
-python -m pytest tests/ -q                    # 95 regression tests
+python -m pytest tests/ -q                    # 107 regression tests
 
 # the winning configuration
 python -m src.training.train --exp_name baseline --loss_type dice_ce \
@@ -158,6 +158,29 @@ quarter turn lays the patient on their side. No scanner produces such an image.
 `anatomic` is restricted to transforms corresponding to real acquisition
 variation. The two exist to quantify the difference.
 
+| `--crop` | Training input |
+|---|---|
+| `none` | the full 192 × 192 slice |
+| `tumor` | a `--crop_size` window around the lesion, jittered, at 4× the positive-pixel density |
+
+Cropping is **training-only, and deliberately so**: at inference the tumour
+location is the unknown being predicted, so centring a window on it would feed the
+label to the model.
+
+A window-trained model still has to be evaluated somehow, and handing it a full
+slice changes its field of view — which costs more than the crop itself is worth.
+`--sw_roi` covers each slice with overlapping windows and blends the predictions
+back into a full-size map, restoring the field of view the model trained under. It
+consults no ground truth: the grid is fixed, every pixel is covered, and it runs
+identically on an unannotated patient. This is the standard inference path for
+patch-trained segmentation networks.
+
+```bash
+python -m src.evaluation.evaluate \
+    --checkpoint output/experiments/crop96_unet/seed_42/best_model.pt \
+    --split test --sw_roi 96
+```
+
 ### 5. Training (`src/training/train.py`)
 
 Mixed precision, cosine LR schedule, full checkpointing with resume, per-epoch
@@ -228,10 +251,15 @@ python -m src.training.train --exp_name focal_tversky --loss_type focal_tversky 
 python -m src.training.train --exp_name no_augment --augment none \
     --loss_type dice_ce $COMMON
 
-# 5. Hard negative sampling (implemented but not yet benchmarked —
-#    see "Hard negative sampling" in EXPERIMENTS.md)
-python -m src.training.train --exp_name hard_negatives --loss_type dice_ce \
+# 5. Hard negative sampling       (negatives drawn from beside the tumour,
+#    same count as balanced, so only their selection differs)
+python -m src.training.train --exp_name hard_negatives_unet --loss_type dice_ce \
     --sampling hard_negatives --epochs 100 --lr_t_max 50 --patience 20
+
+# 6. Tumour-centred crop          (training only — validation and test stay
+#    full-size, since the tumour location is what is being predicted)
+python -m src.training.train --exp_name crop96_unet --loss_type dice_ce \
+    --crop tumor --crop_size 96 $COMMON
 
 # Architectures
 python -m src.training.train --exp_name attention_unet \
@@ -246,7 +274,15 @@ python -m src.training.train --exp_name unet_25d --n_adjacent 3 $COMMON
 The headline result: `all` sampling and anatomic augmentation are the two large
 effects (+0.18 and +0.22 Dice); architecture choice trails far behind, and at ten
 test patients 2.5D and SegResNet are statistically indistinguishable from the
-baseline. The baseline was run on three seeds (42, 43, 44) to measure that
+baseline. Within sampling, it is the *amount* of negative anatomy that counts:
+`balanced` and `hard_negatives` keep the same number of negatives and differ only
+in where they are drawn from, and they land within noise of each other, while
+`all` beats both by roughly 0.2. Training on tumour-centred windows does not help
+either, once inference is given the same field of view — and the size of that
+qualifier is itself a finding: changing field of view between training and
+inference costs the baseline more than half its Dice.
+
+The baseline was run on three seeds (42, 43, 44) to measure that
 run-to-run noise; every other configuration above changes one variable against
 it on a single seed. A handful of follow-up runs — Tversky and Focal Tversky at a
 gentler `beta`, a U-Net at SegResNet's learning rate, and Attention U-Net under

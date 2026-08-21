@@ -32,11 +32,15 @@ the significance threshold at df=9, p=0.05 is ±2.262.
 | DiceFocal | 0.3536 | −0.132 | −3.13 | 1/10 |
 | Attention U-Net | 0.3155 | −0.170 | −2.92 | 0/10 |
 | `balanced` sampling | 0.3023 | −0.183 | **−4.49** | 0/10 |
+| `hard_negatives` sampling | 0.2659 | −0.219 | **−5.87** | 0/10 |
+| tumour crop 96 px, matched inference | 0.3666 | −0.119 | **−2.97** | 1/10 |
 | no augmentation | 0.2648 | −0.221 | −2.82 | 4/10 |
 | Focal Tversky (β=0.7 / 0.6) | 0.1043 / 0.0864 | −0.39 | — | 0/10 |
 | Tversky (β=0.7 / 0.6) | 0.0771 / 0.0885 | −0.40 | — | 0/10 |
 
 Baseline per seed: 0.5069 (42), 0.4751 (43), 0.4737 (44).
+
+Every row is evaluated on full slices except the crop row, which uses sliding-window inference so that its training and inference field of view agree; evaluated on full slices the same checkpoint scores 0.1398, and [section 8](#8--tumour-centred-crop-against-the-full-slice) explains why that number measures the mismatch rather than the crop.
 
 ### What the data says
 
@@ -47,8 +51,20 @@ below threshold).
 
 **`all` beats `balanced` by +0.18.** This contradicts the original reasoning, which justified `balanced` as a way to avoid collapsing to "always predict
 negative". Empirically, matching the training distribution to the evaluation
-distribution matters more than the class imbalance does. It is also the strongest
-single difference in the table — t = −4.49, losing on 10 patients out of 10.
+distribution matters more than the class imbalance does. It is also among the
+strongest single differences in the table — t = −4.49, losing on 10 patients out
+of 10.
+
+**What matters is how many negatives the model sees, not which ones.** `balanced`
+and `hard_negatives` keep the same number of negative slices and differ only in
+where they are drawn from: uniformly across the body, or clustered around the
+lesion. The clustered version was expected to raise precision, since false
+positives appear next to the tumour. It lowered it — 0.3784 to 0.2704, with false
+positive components rising from 8.1 to 19.6 — because negatives drawn only from
+beside the lesion never teach the model to reject the liver, the shoulders or the
+scanner table. The two schemes are statistically indistinguishable on Dice
+(t = −1.01), while `all`, which simply shows more of everything, beats both by
+roughly 0.2.
 
 **Extra capacity does not help at 44 training patients.** Attention U-Net carries
 22% more parameters than the baseline plus attention gates that must themselves be
@@ -60,6 +76,21 @@ ways to fit noise.
 the tumour — sensitivity is 0.39–0.43, comparable to the baseline's 0.434 — but
 because it paints seven to eight times more volume than exists. The cause is
 structural and is worked out below.
+
+**Field of view is a variable, not a free choice.** Handing a trained model a
+different field of view at inference than it saw during training costs a large
+fraction of its score in either direction — the baseline U-Net falls from 0.5069
+to 0.1961 on tiled windows, the same checkpoint on the same data. The
+normalisation layer explains much of the spread, since InstanceNorm and GroupNorm
+compute their statistics from each input's own content while BatchNorm uses fixed
+ones. Worked out [below](#field-of-view-is-a-variable-in-its-own-right).
+
+**Cropping to the lesion does not help once that mismatch is removed.** At a
+matched field of view it costs the baseline 0.140 (t = −2.95) and leaves 2.5D and
+SegResNet unchanged. The exception is Attention U-Net at +0.129, just under
+significance, which also produces the best score any configuration has reached on
+lung_058 — the smallest tumour in the test set, at 0.518 against the baseline's
+0.185.
 
 **HD95 is destroyed by distant false positives, not by boundary quality.**
 lung_001 reached sensitivity 0.969 — the lesion is found almost completely — yet
@@ -186,13 +217,215 @@ CT is not a chest CT.
 
 ### 7 — Hard negative sampling
 
-`hard_negatives` replaces the randomly drawn negatives of `balanced` with negatives
-concentrated along Z around the tumour (70% near, 30% far) — lung or other tissue
-rather than air, so the network learns a finer boundary instead of merely
-separating "tumour vs obvious air". Never completed: the session was interrupted
-during training and the run directory holds only checkpoints.
+```bash
+python -m src.training.train --exp_name hard_negatives_unet \
+    --sampling hard_negatives --epochs 100 --lr_t_max 50 --patience 20
+```
 
-### 8 — Attention U-Net
+All three sampling modes keep every positive slice; they differ only in which
+negatives they add. `balanced` draws them uniformly from the body, while
+`hard_negatives` concentrates them along Z around the tumour — 70% near, 30% far.
+
+The two take **the same number** of negatives, 1419 against 1416 on the training
+split, so the controlled comparison is `hard_negatives` against `balanced` rather
+than against `all`. Only the choice of negatives changes:
+
+| | median distance to the tumour | within 20 slices |
+|---|---:|---:|
+| `balanced` | 72 slices | 14.5% |
+| `hard_negatives` | 27 slices | **42.2%** |
+
+The reasoning was that a slice immediately above or below the lesion contains
+vessels, atelectasis and mediastinal structures that resemble it, and those are
+where false positives actually appear. A uniformly drawn negative is usually air
+or obvious body wall and teaches almost nothing. If that held, `hard_negatives`
+would raise **precision** over `balanced` at comparable sensitivity.
+
+**It does the opposite.**
+
+| U-Net | Dice | sensitivity | precision | FP components |
+|---|---:|---:|---:|---:|
+| `balanced` | 0.3023 | 0.2928 | **0.3784** | **8.1** |
+| `hard_negatives` | 0.2659 | 0.3358 | 0.2704 | 19.6 |
+
+Precision falls by 0.11 and the false-positive components more than double.
+Against `balanced` the Dice difference is −0.036 at t = −1.01, so on the metric
+itself the two are indistinguishable; it is the direction of the precision and
+component counts that refutes the reasoning.
+
+Run across all four architecture configurations, each against the same
+architecture trained on its usual sampling:
+
+| architecture | its usual sampling | `hard_negatives` | Δ | t |
+|---|---:|---:|---:|---:|
+| U-Net | 0.3023 (`balanced`) | 0.2659 | −0.036 | −1.01 |
+| 2.5D | 0.4259 (`all`) | 0.3203 | −0.106 | **−5.21** |
+| Attention U-Net | 0.3155 (`all`) | 0.3050 | −0.011 | −0.21 |
+| SegResNet | 0.4181 (`all`) | 0.3258 | −0.092 | −1.64 |
+
+No configuration improves. The reason the hypothesis fails is visible in the
+construction: concentrating negatives near the lesion means the model is never
+shown the anatomy that is far from it — liver, shoulders, apex, scanner table.
+Only 30% of an already small negative set was drawn from "far", which works out
+to roughly ten slices per patient to cover the entire rest of the body. The
+difficulty gained did not pay for the coverage lost.
+
+**The finding is therefore about count, not selection.** `all` (0.5069) beats both
+subsampling schemes by a wide margin, while `balanced` (0.3023) and
+`hard_negatives` (0.2659) — same number of negatives, very different choice of
+them — are statistically indistinguishable. How many negatives the model sees
+dominates; which ones they are does not measurably matter.
+
+There is no efficiency argument either. At 2835 slices per epoch against 14368,
+`hard_negatives` trains roughly five times faster than the baseline, but it buys
+nothing over `balanced`, which is equally cheap.
+
+### 8 — Tumour-centred crop against the full slice
+
+```bash
+python -m src.training.train --exp_name crop96_unet \
+    --crop tumor --crop_size 96 --sampling all \
+    --epochs 100 --lr_t_max 50 --patience 20
+```
+
+**The crop applies to training only.** At inference the tumour location is exactly
+what is being predicted, so a window centred on the ground-truth centroid would
+feed the label to the model. Validation and test always run on the full 192×192
+slice. This works because all four configurations are fully convolutional: they
+accept 96×96 while training and 192×192 at evaluation unchanged.
+
+What it changes, measured on the training split:
+
+| | tumour pixels | slices containing tumour |
+|---|---:|---:|
+| full slice | 0.076% | 10.2% |
+| 96 px crop | **0.303%** | 10.2% |
+
+Density rises by exactly the area ratio, 192²/96² = 4. The proportion of slices
+containing a tumour is untouched, which keeps this experiment orthogonal to
+sampling.
+
+96 px is the smallest window that holds every lesion with context to spare — the
+largest tumour bounding box in the training split is 38×57 px at 1 mm — while
+staying divisible by 16, as the four downsampling stages require. The centre is
+jittered by ±24 px rather than placed exactly on the centroid: cropping precisely
+would put the tumour at the middle of every training sample, from which a network
+can learn the position instead of the appearance, and that shortcut collapses the
+moment it is evaluated on a full slice where the lesion is off-centre. Slices with
+no tumour are cropped at a random position rather than dropped, which would
+silently turn this into a sampling experiment as well.
+
+Two effects pull against each other. Four times the positive density should help
+the Dice term, which now sees a target that is larger relative to its background.
+But the model never sees a whole thorax during training and is then asked to
+search an image four times the area, which may cost precision.
+
+#### The first measurement was not measuring the crop
+
+Evaluated on full slices, three of the four configurations collapsed — U-Net to
+0.1398 with 172.9 false-positive components per patient. That is not what a model
+which failed to learn looks like. Fed a 96 px window instead, the same checkpoints
+score 0.45 to 0.52, at or above what the baseline reaches on validation. Every one
+of them had learned the task; what they could not do was carry it over to a
+different field of view.
+
+| model | fed a 96 px window | fed the full slice | drop | normalisation |
+|---|---:|---:|---:|---|
+| `crop96_unet` | 0.4520 | 0.2224 | **−0.230** | Instance |
+| `crop96_unet_25d` | 0.4516 | 0.3199 | −0.132 | Instance |
+| `crop96_segresnet` | 0.5227 | 0.4833 | −0.039 | Group |
+| `crop96_attention_unet` | 0.5049 | 0.5111 | **+0.006** | Batch |
+
+Comparing a window-trained model against a slice-trained one therefore changes two
+things at once, and the field of view dominates. Separating them needs an
+inference path that gives the window-trained model the field of view it was
+trained under — see [below](#field-of-view-is-a-variable-in-its-own-right).
+
+#### The crop's actual effect
+
+With `--sw_roi 96`, each slice is covered by overlapping 96 px windows whose
+predictions are blended back into a full-size map. Both cells below now match
+training and inference field of view, so the difference between them is
+attributable to the crop:
+
+| architecture | full slice, trained and tested | 96 px, trained and tested | Δ | t |
+|---|---:|---:|---:|---:|
+| U-Net | 0.5069 | 0.3666 | **−0.140** | **−2.95** |
+| Attention U-Net | 0.3155 | 0.4447 | **+0.129** | 2.22 |
+| 2.5D | 0.4259 | 0.3960 | −0.030 | −0.88 |
+| SegResNet | 0.4181 | 0.3314 | −0.087 | −1.54 |
+
+**Cropping does not help.** It significantly hurts the baseline U-Net and leaves
+2.5D and SegResNet unchanged. Attention U-Net is the exception at +0.129, but
+t = 2.22 sits just under the 2.262 threshold, so it is suggestive rather than
+established — and it was the weakest configuration to begin with.
+
+Restoring the matched field of view does, however, recover most of what the first
+measurement had lost:
+
+| architecture | full-slice inference | sliding window | Δ | t |
+|---|---:|---:|---:|---:|
+| U-Net | 0.1398 | 0.3666 | **+0.227** | **4.24** (9/10) |
+| 2.5D | 0.1602 | 0.3960 | **+0.236** | **3.24** (8/10) |
+| Attention U-Net | 0.3999 | 0.4447 | +0.045 | 1.14 |
+| SegResNet | 0.3494 | 0.3314 | −0.018 | −0.89 |
+
+False-positive components on U-Net fall from 172.9 per patient to 27.5, and the
+threshold the sweep selects drops from 0.975 to 0.80. The over-segmentation was
+the mismatch, not the training.
+
+**One result worth singling out.** `crop96_attention_unet` under sliding-window
+inference scores **0.5180 on lung_058**, against 0.1847 for the baseline and
+0.3811 for the next best configuration. That patient carries an 807 mm³ tumour,
+smaller than any in the training split, and is where nearly every configuration
+fails. Quadrupling the positive-pixel density helps most exactly where the target
+is smallest, which is the mechanism the crop was supposed to exploit.
+
+### Field of view is a variable in its own right
+
+The crop experiment turned up something that has nothing to do with cropping.
+Changing the field of view between training and inference costs a large fraction
+of a model's performance, in **both** directions, without touching a single
+weight.
+
+Each cell below is the share of its own matched-field-of-view score that a model
+retains once the field of view changes under it:
+
+| architecture | normalisation | trained on slices, tested on windows | trained on windows, tested on slices |
+|---|---|---:|---:|
+| U-Net | Instance | **0.387** | **0.381** |
+| 2.5D | Instance | 0.608 | 0.404 |
+| SegResNet | Group | 0.624 | 1.054 |
+| Attention U-Net | Batch | 0.699 | 0.899 |
+
+The baseline U-Net falls from 0.5069 to 0.1961 purely by being handed tiled
+windows at inference — the same checkpoint, the same data, only a different field
+of view. It loses about 62% of its score in either direction, which is a striking
+symmetry.
+
+The normalisation layer is a large part of why. **InstanceNorm and GroupNorm
+derive their statistics from the content of each input**, so a window filled with
+lung and tumour and a slice dominated by air outside the body normalise the same
+anatomy to different values. **BatchNorm applies fixed running statistics at
+evaluation**, so what surrounds a structure does not change how it is scaled.
+That predicts InstanceNorm as the most fragile and BatchNorm as the most robust,
+which is what the extremes show. It does not explain the whole ordering —
+SegResNet pays no penalty at all going from windows to slices — so normalisation
+is a major factor rather than the only one.
+
+A second mechanism is present and this experiment cannot fully separate it.
+Blending nine overlapping windows with Gaussian weights smooths the probability
+map. Re-selecting the threshold on validation absorbs the change in scale — the
+baseline moves from 0.75 to 0.35 — but not the change in shape.
+
+**The practical consequence** is that training-time field of view and
+inference-time field of view are a pair, not two independent choices. Patch-based
+training is a legitimate and standard technique, but only alongside an inference
+path that reproduces the same field of view. An initial reading of this experiment
+attributed the collapse to cropping itself, which the matched-field-of-view cells
+show was wrong.
+
+### 9 — Attention U-Net
 
 ```bash
 python -m src.training.train --exp_name attention_unet \
@@ -205,7 +438,7 @@ and air before concatenation with the decoder. Relevant in principle because the
 target occupies under 1% of the volume. 1,987,417 parameters against the
 baseline's 1,624,844.
 
-### 9 — SegResNet
+### 10 — SegResNet
 
 ```bash
 python -m src.training.train --exp_name segresnet \
@@ -233,7 +466,7 @@ The control scored 0.4642, so the like-for-like comparison is SegResNet 0.4181
 against U-Net 0.4642 — the gap most attributable to the architecture, not the
 learning rate.
 
-### 10 — 2.5D, three consecutive slices
+### 11 — 2.5D, three consecutive slices
 
 ```bash
 python -m src.training.train --exp_name unet_25d --n_adjacent 3 \
@@ -249,7 +482,7 @@ normalised space and means air, so zero-padding would tell the network there is 
 above the apex of the lung. Z spacing is uniform by construction, since resampling
 to 1 mm isotropic precedes the stacking.
 
-### 11 — Attention U-Net under the earlier epoch budget
+### 12 — Attention U-Net under the earlier epoch budget
 
 ```bash
 python -m src.training.train --exp_name attention_unet_50ep_pat10 \
@@ -423,10 +656,53 @@ sessions, same seed, bit-identical trajectories.
 0.0047 measured in round 1. Single-seed conclusions are less safe than that early
 figure suggested.
 
+### Round 6 — negative selection and field of view
+
+Two further data-pipeline variables were tested last, each across all four
+architecture configurations: which negative slices the model is shown, and how
+much of a slice it sees at a time.
+
+**Hard negative sampling refuted its own hypothesis.** The prediction was higher
+precision, since false positives cluster next to the lesion. Precision fell
+instead, from 0.3784 to 0.2704, and false-positive components rose from 8.1 to
+19.6. Nothing improved on any architecture.
+
+What came out of it is a cleaner statement than the one being tested. `balanced`
+and `hard_negatives` hold the negative count fixed and vary only the selection,
+and they land within noise of each other (t = −1.01) — while `all`, which changes
+the count and nothing else, beats both by around 0.2. On this dataset the amount
+of negative anatomy the model is shown dominates, and the choice of which
+negatives does not measurably register. That also explains the failure: negatives
+drawn only from beside the tumour leave the liver, the shoulders and the scanner
+table unrepresented, and roughly ten "far" slices per patient is not enough to
+cover them.
+
+**Cropping to the lesion looked catastrophic, and was not.** Three of the four
+window-trained models scored between 0.14 and 0.35 on full slices, with U-Net
+producing 172.9 false-positive components per patient. Fed the 96 px windows they
+were trained on, the same checkpoints score 0.45 to 0.52 — every one of them had
+learned the task. The first reading blamed the crop; the failure was the field of
+view changing between training and inference.
+
+Re-evaluating through overlapping windows, which restores the training field of
+view without ever consulting the ground truth, recovered +0.227 on U-Net
+(t = 4.24) and +0.236 on 2.5D (t = 3.24). With both cells then matched, the crop's
+own effect is negative or neutral everywhere except Attention U-Net, which gains
+0.129 at t = 2.22 — under the significance threshold.
+
+Two things came out of it that were not the question being asked. Field of view
+turns out to cost a large fraction of a model's score whenever it changes between
+training and inference, in both directions, tracking the normalisation layer.
+And `crop96_attention_unet` under matched inference reaches **0.518 on lung_058**,
+the 807 mm³ tumour smaller than anything in the training split, against 0.185 for
+the baseline — the density argument for cropping holding exactly where the target
+is smallest, even though it does not hold on average.
+
 ### What remains open
 
-**The test set has ten patients.** Three of the eight configurations are
-statistically indistinguishable from the baseline at that size, and one patient
+**The test set has ten patients.** Only two of the seven configurations carrying
+a paired test are separable from the baseline in the direction of being *worse but
+not significantly so* — 2.5D and SegResNet sit inside the noise — and one patient
 (lung_036) is a guaranteed zero for reasons unrelated to model quality, which caps
 macro Dice at 0.9 × the mean of the rest. Five-fold cross-validation would give a
 far more stable estimate and would let lung_036 appear in training for four folds
@@ -440,6 +716,18 @@ direction but did not solve it.
 the final loss, and the mechanism — plausibly that the attention gates need the
 gradient signal on empty slices that `smooth_nr = 0` removes — is a hypothesis, not
 a tested result.
+
+**The crop helps small lesions and hurts on average, and only one patient carries
+that claim.** lung_058 is the sole small-category case in the test set, so the
+0.518 it reaches under a window-trained Attention U-Net rests on a single volume.
+Confirming it would need a split with several small tumours in test, or
+cross-validation.
+
+**Two mechanisms are tangled in the field-of-view result.** The normalisation
+layer explains the extremes but not the whole ordering, and Gaussian blending
+across overlapping windows smooths the probability map independently of that.
+Separating them would mean re-running the matrix with the blending weights flat,
+or with the normalisation layers swapped between architectures.
 
 ---
 
@@ -465,7 +753,7 @@ a tested result.
 | 2.5D with 3 or 5 slices | `--n_adjacent {1,3,5}`; edges replicate the end slice rather than zero-padding |
 | Z spacing for 2.5D | uniform by construction — 1 mm isotropic resampling precedes stacking |
 | per-model reporting | `benchmark_report.json`: parameters, time per epoch, GPU memory, inference time per volume |
-| regression suite | `tests/` — 95 tests |
+| regression suite | `tests/` — 107 tests |
 
 Two items are handled differently from their original phrasing, both deliberately.
 `DiceMetric` is no longer used at all, so the question of `ignore_empty` does not

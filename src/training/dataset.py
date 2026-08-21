@@ -3,16 +3,18 @@ PyTorch Dataset over the preprocessed per-patient slice stacks.
 
 Reads the .npy volumes written by src.preprocessing.preprocessing through a
 memory map and exposes individual axial slices. Keeping whole volumes on disk,
-rather than a pre-filtered pile of slice files, is what allows three decisions to
+rather than a pre-filtered pile of slice files, is what allows four decisions to
 be made at runtime instead of being baked into the preprocessed data:
 
     sampling    which slices a split draws from (train only)
     augment     which spatial transforms are applied (train only)
+    crop        full slice versus a tumour-centred window (train only)
     n_adjacent  2D (1 slice) versus 2.5D (3 or 5 consecutive slices)
 
-Validation and test always iterate every slice of every volume, so the reported
-metrics reflect the real ~9% positive-slice distribution rather than a balanced
-subset.
+Validation and test always iterate every slice of every volume at full size, so
+the reported metrics reflect the real ~9% positive-slice distribution rather than
+a balanced subset, and are measured on the same field of view a deployed model
+would see.
 
 Usage:
     from src.training.dataset import build_dataloaders
@@ -137,6 +139,84 @@ AUGMENTATIONS = {
 
 
 # ============================================================================
+#  CROPPING
+# ============================================================================
+
+CROP_MODES = ("none", "tumor")
+
+# 96 x 96 out of the preprocessed 192 x 192. The largest tumour bounding box in
+# the training split measures 38 x 57 px at 1 mm spacing, so this holds every
+# lesion in the dataset with surrounding context to spare, and it stays divisible
+# by 16 as the four downsampling stages of the U-Net require.
+DEFAULT_CROP_SIZE = 96
+
+
+def _crop_tumor_centered(img, lbl, rng, size):
+    """
+    Cuts a `size` x `size` window around the tumour, or at a random position when
+    the slice has none.
+
+    Applied to training slices only. At inference the tumour location is exactly
+    what is being predicted, so centring a window on it would feed the ground
+    truth to the model; validation and test therefore always run on the full
+    slice. That asymmetry is the point of the experiment: the question is whether
+    concentrating the training signal on a tumour-sized window produces a better
+    model when it is later asked to search a whole slice.
+
+    The centre is jittered rather than exact. Cropping precisely on the centroid
+    would put the tumour at the middle of the window in every single training
+    sample, from which a network can learn the position instead of the appearance
+    — a shortcut that collapses the moment it is evaluated on a full slice where
+    the lesion is off-centre. The jitter spans a quarter of the window, so the
+    tumour lands anywhere in the middle half.
+
+    Slices with no tumour are cropped at a uniformly random position instead of
+    being dropped. Discarding them would silently turn this into a sampling
+    experiment as well, and sampling is a separate variable with its own runs.
+
+    Args:
+        img (np.ndarray): (C, H, W) image slices.
+        lbl (np.ndarray): (1, H, W) mask.
+        rng (np.random.Generator): Seeded random generator.
+        size (int): Side length of the square window.
+
+    Returns:
+        tuple: (cropped_img, cropped_lbl), each `size` x `size` in the last two
+        axes.
+    """
+    h, w = img.shape[1], img.shape[2]
+    if size > h or size > w:
+        raise ValueError(
+            f"crop_size {size} exceeds the slice, which is {h} x {w}")
+    if size % 16 or size < 32:
+        # Four downsampling stages halve the window four times, and the
+        # normalization layers need at least a 2x2 map at the bottleneck. Below
+        # 32 the failure surfaces as an opaque shape error partway through the
+        # first epoch instead of here.
+        raise ValueError(
+            f"crop_size must be a multiple of 16 and at least 32, got {size}")
+
+    half = size // 2
+    ys, xs = np.nonzero(lbl[0])
+
+    if len(ys):
+        jitter = size // 4
+        center_y = int(ys.mean()) + int(rng.integers(-jitter, jitter + 1))
+        center_x = int(xs.mean()) + int(rng.integers(-jitter, jitter + 1))
+    else:
+        center_y = int(rng.integers(half, h - half + 1))
+        center_x = int(rng.integers(half, w - half + 1))
+
+    # Clamping the origin keeps the window inside the slice, so a tumour near an
+    # edge shifts the window rather than padding it with fabricated background.
+    top = int(np.clip(center_y - half, 0, h - size))
+    left = int(np.clip(center_x - half, 0, w - size))
+
+    return (img[:, top:top + size, left:left + size],
+            lbl[:, top:top + size, left:left + size])
+
+
+# ============================================================================
 #  DATASET
 # ============================================================================
 
@@ -151,18 +231,24 @@ class LungSliceDataset(Dataset):
         sampling (str): 'all', 'balanced', or 'hard_negatives'. Only meaningful
             for training; evaluation splits must use 'all'.
         augment (str): 'none', 'standard', or 'anatomic'.
+        crop (str): 'none' for the full slice, or 'tumor' for a tumour-centred
+            window. Training only; evaluation splits must use 'none'.
+        crop_size (int): Side length of that window.
         n_adjacent (int): 1 for 2D, 3 or 5 for 2.5D. Must be odd.
-        seed (int): Base seed for sampling and augmentation.
+        seed (int): Base seed for sampling, augmentation and cropping.
     """
 
     def __init__(self, volumes_dir, index, case_ids, sampling="all",
-                 augment="none", n_adjacent=1, seed=42):
+                 augment="none", crop="none", crop_size=DEFAULT_CROP_SIZE,
+                 n_adjacent=1, seed=42):
         if n_adjacent % 2 != 1:
             raise ValueError(f"n_adjacent must be odd, got {n_adjacent}")
         if sampling not in ("all", "balanced", "hard_negatives"):
             raise ValueError(f"Unknown sampling mode: {sampling}")
         if augment not in AUGMENTATIONS:
             raise ValueError(f"Unknown augment mode: {augment}")
+        if crop not in CROP_MODES:
+            raise ValueError(f"Unknown crop mode: {crop}")
 
         self.volumes_dir = volumes_dir
         self.index = index
@@ -170,6 +256,8 @@ class LungSliceDataset(Dataset):
         self.sampling = sampling
         self.augment_fn = AUGMENTATIONS[augment]
         self.augment_name = augment
+        self.crop = crop
+        self.crop_size = crop_size
         self.n_adjacent = n_adjacent
         self.half_window = n_adjacent // 2
         self.seed = seed
@@ -213,7 +301,8 @@ class LungSliceDataset(Dataset):
                     lo, hi = min(positives), max(positives)
                     margin = max(10, (hi - lo))
                     near = [s for s in negatives if lo - margin <= s <= hi + margin]
-                    far = [s for s in negatives if s not in set(near)]
+                    near_set = set(near)
+                    far = [s for s in negatives if s not in near_set]
                     n_near = min(len(near), int(0.7 * len(positives)))
                     n_far = min(len(far), len(positives) - n_near)
                     picked = list(rng.choice(near, n_near, replace=False)) if n_near else []
@@ -259,10 +348,17 @@ class LungSliceDataset(Dataset):
                         for s in neighbour_idx], axis=0)
         lbl = np.asarray(lbl_vol[:, :, slice_idx], dtype=np.float32)[None, ...]
 
-        if self.augment_fn is not None:
+        if self.augment_fn is not None or self.crop == "tumor":
             rng = np.random.default_rng(
                 (self.seed * 1_000_003 + self.epoch * 100_003 + idx) % (2 ** 32))
-            img, lbl = self.augment_fn(img, lbl, rng)
+
+            # Augmentation runs on the full slice and the crop follows it, so the
+            # window is centred on where the tumour ended up after a rotation or
+            # shift rather than where it started.
+            if self.augment_fn is not None:
+                img, lbl = self.augment_fn(img, lbl, rng)
+            if self.crop == "tumor":
+                img, lbl = _crop_tumor_centered(img, lbl, rng, self.crop_size)
 
         return {
             "image": torch.from_numpy(np.ascontiguousarray(img, dtype=np.float32)),
@@ -289,19 +385,24 @@ def load_index(preprocessed_dir):
 
 
 def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
-                      augment="anatomic", n_adjacent=1, seed=42, num_workers=2):
+                      augment="anatomic", crop="none",
+                      crop_size=DEFAULT_CROP_SIZE, n_adjacent=1, seed=42,
+                      num_workers=2):
     """
     Builds the train, validation, and test DataLoaders.
 
-    Sampling and augmentation apply to the training split only. Validation and
-    test always use every slice with no augmentation, so that model selection and
-    the final numbers are measured against the real class distribution.
+    Sampling, augmentation and cropping apply to the training split only.
+    Validation and test always use every slice, unaugmented and at full size, so
+    that model selection and the final numbers are measured against the real
+    class distribution and the real field of view.
 
     Args:
         preprocessed_dir (str): Path to output/preprocessed.
         batch_size (int): Mini-batch size.
         sampling (str): Training sampling mode.
         augment (str): Training augmentation mode.
+        crop (str): Training crop mode, 'none' or 'tumor'.
+        crop_size (int): Side length of the tumour-centred window.
         n_adjacent (int): 1 for 2D, 3 or 5 for 2.5D.
         seed (int): Base seed.
         num_workers (int): DataLoader worker processes.
@@ -315,13 +416,16 @@ def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
     datasets = {
         "train": LungSliceDataset(
             volumes_dir, index, index["splits"]["train"],
-            sampling=sampling, augment=augment, n_adjacent=n_adjacent, seed=seed),
+            sampling=sampling, augment=augment, crop=crop, crop_size=crop_size,
+            n_adjacent=n_adjacent, seed=seed),
         "val": LungSliceDataset(
             volumes_dir, index, index["splits"]["val"],
-            sampling="all", augment="none", n_adjacent=n_adjacent, seed=seed),
+            sampling="all", augment="none", crop="none",
+            n_adjacent=n_adjacent, seed=seed),
         "test": LungSliceDataset(
             volumes_dir, index, index["splits"]["test"],
-            sampling="all", augment="none", n_adjacent=n_adjacent, seed=seed),
+            sampling="all", augment="none", crop="none",
+            n_adjacent=n_adjacent, seed=seed),
     }
 
     loaders = {

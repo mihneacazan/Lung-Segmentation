@@ -34,11 +34,14 @@ SPLITS = {"train": ["c_tr1", "c_tr2"], "val": ["c_va1"], "test": ["c_te1"]}
 POSITIVE = [3, 4, 5]
 
 
-@pytest.fixture
-def tiny_project(tmp_path, monkeypatch):
+def _build_tiny_project(tmp_path, monkeypatch, shape=SHAPE):
     """
     Builds a complete miniature project on disk: preprocessed volumes, an index,
     reconstruction metadata, and matching ground-truth NIfTI files.
+
+    `shape` is a parameter because the cropping tests need slices large enough
+    for a crop to actually remove something, while every other test wants the
+    smallest volumes that still train.
 
     Returns:
         pathlib.Path: the fake OUTPUT_DIR.
@@ -52,7 +55,7 @@ def tiny_project(tmp_path, monkeypatch):
     for d in (volumes, metadata_dir, labels_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    h, w, d_slices = SHAPE
+    h, w, d_slices = shape
     cases = {}
 
     # LAS, exactly like the real dataset: axis 0 is flipped on the way to RAS.
@@ -62,8 +65,8 @@ def tiny_project(tmp_path, monkeypatch):
     for split, case_ids in SPLITS.items():
         for case_id in case_ids:
             rng = np.random.default_rng(abs(hash(case_id)) % 2**32)
-            img = rng.uniform(0.1, 0.3, SHAPE).astype(np.float16)
-            lbl = np.zeros(SHAPE, dtype=np.uint8)
+            img = rng.uniform(0.1, 0.3, shape).astype(np.float16)
+            lbl = np.zeros(shape, dtype=np.uint8)
             for s in POSITIVE:
                 lbl[10:20, 12:22, s] = 1
                 img[10:20, 12:22, s] = 0.95      # learnable: tumour is bright
@@ -81,16 +84,16 @@ def tiny_project(tmp_path, monkeypatch):
             (metadata_dir / f"{case_id}.json").write_text(json.dumps({
                 "case_id": case_id,
                 "original_affine": affine.tolist(),
-                "original_shape": list(SHAPE),
+                "original_shape": list(shape),
                 "original_spacing": [1.0, 1.0, 1.0],
                 "ornt": ornt,
-                "canonical_shape": list(SHAPE),
+                "canonical_shape": list(shape),
                 "canonical_spacing": [1.0, 1.0, 1.0],
                 "target_spacing": [1.0, 1.0, 1.0],
-                "resampled_shape": list(SHAPE),
+                "resampled_shape": list(shape),
                 "crop_bbox": {"x_min": 0, "x_max": h, "y_min": 0, "y_max": w,
                               "z_min": 0, "z_max": d_slices},
-                "cropped_shape": list(SHAPE),
+                "cropped_shape": list(shape),
                 "target_slice_size": [h, w],
                 "hu_min": -1000.0, "hu_max": 400.0,
             }))
@@ -110,6 +113,17 @@ def tiny_project(tmp_path, monkeypatch):
     monkeypatch.setattr(train_mod, "OUTPUT_DIR", str(output_dir))
 
     return output_dir
+
+
+@pytest.fixture
+def tiny_project(tmp_path, monkeypatch):
+    return _build_tiny_project(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def tiny_project_croppable(tmp_path, monkeypatch):
+    """Slices twice the usual side, so a 32 px window is a real crop."""
+    return _build_tiny_project(tmp_path, monkeypatch, shape=(64, 64, 10))
 
 
 def run(tiny_project, **overrides):
@@ -187,9 +201,9 @@ def test_history_records_both_dice_variants(tiny_project):
 @pytest.mark.parametrize("model_type", ["unet", "attention_unet", "segresnet"])
 def test_every_architecture_trains(tiny_project, model_type):
     """
-    All three architectures must run. `--model_type` did not exist, so the
-    attention U-Net and SegResNet experiments died at argument parsing and those
-    two model files were never executed at all.
+    All three architectures must run end to end. Architecture selection goes
+    through a factory rather than an import, so a model file can be present and
+    correct yet unreachable from the CLI; this is what checks the wiring.
     """
     report = run(tiny_project, model_type=model_type, exp_name=f"smoke_{model_type}")
     assert report["parameters_trainable"] > 0
@@ -200,9 +214,9 @@ def test_every_architecture_trains(tiny_project, model_type):
                                        "focal_tversky"])
 def test_every_loss_trains(tiny_project, loss_type):
     """
-    All four losses must run. `focal_tversky` passed a `gamma` argument that
-    MONAI's TverskyLoss does not accept, so that experiment raised TypeError
-    before the first epoch.
+    All four losses must run. `focal_tversky` is the fragile one: MONAI's
+    TverskyLoss accepts no `gamma`, so the focal exponent is composed by hand in
+    losses.py and the wiring has to be exercised rather than assumed.
     """
     report = run(tiny_project, loss_type=loss_type, exp_name=f"smoke_{loss_type}")
     assert np.isfinite(report["best_val_dice_soft"])
@@ -212,6 +226,38 @@ def test_every_loss_trains(tiny_project, loss_type):
 def test_every_sampling_mode_trains(tiny_project, sampling):
     report = run(tiny_project, sampling=sampling, exp_name=f"smoke_{sampling}")
     assert report["config"]["sampling"] == sampling
+
+
+def test_tumor_crop_trains_and_still_evaluates_full_size(tiny_project_croppable):
+    """
+    Training on a window while evaluating on the whole slice is the entire
+    premise of `--crop tumor`, and it only works because these architectures are
+    fully convolutional. If that ever stopped holding, the run would fail here
+    rather than silently reporting a number measured on the wrong field of view.
+    """
+    report = run(tiny_project_croppable, crop="tumor", crop_size=32,
+                 sampling="all", exp_name="smoke_crop")
+
+    assert report["config"]["crop"] == "tumor"
+    assert report["config"]["crop_size"] == 32
+    assert np.isfinite(report["best_val_dice_soft"])
+    # Reconstruction runs against the full preprocessed slice, so a metric set
+    # coming back at all means evaluation never saw the cropped geometry.
+    assert "mean_dice_3d" in report["test_metrics_summary"]
+
+
+@pytest.mark.parametrize("model_type", ["unet", "attention_unet", "segresnet"])
+def test_tumor_crop_works_for_every_architecture(tiny_project_croppable, model_type):
+    """
+    Each architecture has to survive the size change between training and
+    evaluation on its own terms. They normalize differently — instance, batch and
+    group — and only a fully convolutional stack tolerates being handed a larger
+    input at inference than it ever saw while training.
+    """
+    report = run(tiny_project_croppable, crop="tumor", crop_size=32,
+                 sampling="all", model_type=model_type,
+                 exp_name=f"smoke_crop_{model_type}")
+    assert np.isfinite(report["best_val_dice_soft"])
 
 
 @pytest.mark.parametrize("n_adjacent", [1, 3])

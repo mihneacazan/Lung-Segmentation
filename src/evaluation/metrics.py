@@ -330,21 +330,33 @@ def filter_predicted_components(pred_mask: np.ndarray,
 # ============================================================================
 
 def compute_all_3d_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
-                           voxel_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0)) -> Dict[str, float]:
+                           voxel_spacing: Tuple[float, ...] = (1.0, 1.0, 1.0),
+                           surface_metrics: bool = True) -> Dict[str, float]:
     """
     Computes ALL 3D volumetric metrics for a single patient case.
-    
+
     Returns dict with:
         dice_3d, iou_3d, sensitivity_3d, precision_3d, specificity_3d,
         hd95_3d, asd_3d, fp_components, is_failure
+
+    With `surface_metrics=False`, hd95_3d and asd_3d come back as NaN and the two
+    distance transforms behind them are skipped. Those transforms run over the
+    full reconstructed volume - 512 x 512 x 304 for a typical patient here - and
+    dominate the cost of an evaluation by roughly an order of magnitude. Turning
+    them off is for comparisons that hinge on overlap rather than boundary
+    distance, where paying for them would mean trading the number of
+    configurations that fit in a GPU session for numbers nobody reads.
     """
     dice = compute_dice_3d(pred_mask, gt_mask)
     iou = compute_iou_3d(pred_mask, gt_mask)
     sens = compute_sensitivity_3d(pred_mask, gt_mask)
     prec = compute_precision_3d(pred_mask, gt_mask)
     spec = compute_specificity_3d(pred_mask, gt_mask)
-    hd95 = compute_hd95_3d(pred_mask, gt_mask, voxel_spacing)
-    asd = compute_asd_3d(pred_mask, gt_mask, voxel_spacing)
+    if surface_metrics:
+        hd95 = compute_hd95_3d(pred_mask, gt_mask, voxel_spacing)
+        asd = compute_asd_3d(pred_mask, gt_mask, voxel_spacing)
+    else:
+        hd95 = asd = float("nan")
     fp_comps = count_false_positive_components(pred_mask, gt_mask)
     is_failure = bool(dice < 0.10 and (gt_mask > 0.5).sum() > 0)
     

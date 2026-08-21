@@ -11,6 +11,7 @@ Features:
     - Configurable loss              --loss_type {dice_ce, dice_focal, tversky, focal_tversky}
     - Configurable slice sampling    --sampling {balanced, all, hard_negatives}
     - Configurable augmentation      --augment {none, standard, anatomic}
+    - Full slice or tumour window    --crop {none, tumor}
     - 2D or 2.5D input               --n_adjacent {1, 3, 5}
     - Mixed precision, early stopping, full checkpointing, resume
     - Validation on every slice of every volume, never a balanced subset
@@ -38,7 +39,11 @@ from torch.amp import GradScaler, autocast
 from src.config import OUTPUT_DIR
 from src.models.factory import build_model, MODEL_TYPES
 from src.training.losses import build_loss_function, LOSS_TYPES
-from src.training.dataset import build_dataloaders
+from src.training.dataset import (
+    build_dataloaders,
+    CROP_MODES,
+    DEFAULT_CROP_SIZE,
+)
 from src.evaluation.metrics import (
     count_model_parameters,
     measure_gpu_memory_mb,
@@ -287,6 +292,7 @@ def load_tumor_categories() -> dict:
 def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
                             model_type="unet", loss_type="dice_ce",
                             augment="anatomic", sampling="balanced",
+                            crop="none", crop_size=DEFAULT_CROP_SIZE,
                             n_adjacent=1, seed=42, patience=10, min_epochs=15,
                             exp_name="experiment", resume_path=None,
                             num_workers=2, save_nifti=False,
@@ -325,6 +331,7 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         "exp_name": exp_name, "seed": seed, "epochs": epochs,
         "batch_size": batch_size, "lr": lr, "model_type": model_type,
         "loss_type": loss_type, "augment": augment, "sampling": sampling,
+        "crop": crop, "crop_size": crop_size,
         "n_adjacent": n_adjacent, "patience": patience, "min_epochs": min_epochs,
         "lr_t_max": t_max, "max_grad_norm": max_grad_norm,
         "postproc_min_fraction": postproc_min_fraction,
@@ -339,8 +346,8 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
 
     loaders, datasets, index = build_dataloaders(
         preprocessed_dir, batch_size=batch_size, sampling=sampling,
-        augment=augment, n_adjacent=n_adjacent, seed=seed,
-        num_workers=num_workers)
+        augment=augment, crop=crop, crop_size=crop_size,
+        n_adjacent=n_adjacent, seed=seed, num_workers=num_workers)
 
     n_train = len(datasets["train"])
     n_val = len(datasets["val"])
@@ -356,6 +363,9 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
           f"Sampling: {sampling} | Augment: {augment}")
     print(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr} | "
           f"n_adjacent: {n_adjacent}")
+    if crop == "tumor":
+        print(f"  Crop: {crop_size}x{crop_size} tumour-centred (train only; "
+              f"val/test stay full-size)")
     print(f"  LR schedule: cosine over {t_max} epochs | "
           f"grad clip: {max_grad_norm or 'off'}")
     print(f"  Early stopping: patience={patience}, min_epochs={min_epochs}")
@@ -689,6 +699,14 @@ def main():
                         choices=["balanced", "all", "hard_negatives"])
     parser.add_argument("--augment", type=str, default="anatomic",
                         choices=["none", "standard", "anatomic"])
+    parser.add_argument("--crop", type=str, default="none", choices=CROP_MODES,
+                        help="'tumor' trains on a window centred on the lesion "
+                             "instead of the full slice. Training only: "
+                             "validation and test always run full-size, since "
+                             "the tumour location is what is being predicted.")
+    parser.add_argument("--crop_size", type=int, default=DEFAULT_CROP_SIZE,
+                        help="Side length of the --crop tumor window. Must be "
+                             "divisible by 16 for the downsampling stages.")
     parser.add_argument("--n_adjacent", type=int, default=1, choices=[1, 3, 5],
                         help="1 = 2D, 3 or 5 = 2.5D with consecutive slices")
     parser.add_argument("--epochs", type=int, default=50)
@@ -727,7 +745,8 @@ def main():
     kwargs = dict(
         epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
         model_type=args.model_type, loss_type=args.loss_type,
-        augment=args.augment, sampling=args.sampling, n_adjacent=args.n_adjacent,
+        augment=args.augment, sampling=args.sampling,
+        crop=args.crop, crop_size=args.crop_size, n_adjacent=args.n_adjacent,
         patience=args.patience, min_epochs=args.min_epochs,
         exp_name=args.exp_name, num_workers=args.num_workers,
         save_nifti=args.save_nifti, lr_t_max=args.lr_t_max,

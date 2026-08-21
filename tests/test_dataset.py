@@ -22,6 +22,7 @@ Run:
 """
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -328,3 +329,140 @@ def test_rejects_invalid_configuration(fake_dataset):
         LungSliceDataset(volumes, index, index["splits"]["val"], sampling="nope")
     with pytest.raises(ValueError):
         LungSliceDataset(volumes, index, index["splits"]["val"], augment="nope")
+    with pytest.raises(ValueError):
+        LungSliceDataset(volumes, index, index["splits"]["val"], crop="nope")
+
+
+# ============================================================================
+#  TUMOUR-CENTRED CROPPING
+#
+#  The crop is a training-time device. Its whole justification rests on the
+#  model still being asked to search a full slice afterwards, so the tests that
+#  matter most here are the ones pinning down what the crop must NOT do:
+#  reach evaluation, or teach the network that lesions live in the middle.
+# ============================================================================
+
+def test_crop_produces_the_requested_window(fake_dataset):
+    volumes, index = fake_dataset
+    ds = LungSliceDataset(volumes, index, index["splits"]["train"],
+                          sampling="all", crop="tumor", crop_size=96, seed=1)
+    for i in range(0, len(ds), 7):
+        sample = ds[i]
+        assert sample["image"].shape[-2:] == (96, 96)
+        assert sample["label"].shape[-2:] == (96, 96)
+
+
+def test_crop_keeps_the_tumour_inside_the_window(fake_dataset):
+    """A window that misses the lesion would train the model on pure background."""
+    volumes, index = fake_dataset
+    ds = LungSliceDataset(volumes, index, index["splits"]["train"],
+                          sampling="all", crop="tumor", crop_size=96, seed=3)
+
+    positives = [i for i, (_, s) in enumerate(ds.samples) if s in POSITIVE]
+    assert positives, "fixture should contain positive slices"
+
+    for i in positives:
+        assert ds[i]["label"].sum() > 0, (
+            f"sample {i} is a positive slice but its crop contains no tumour")
+
+
+def test_crop_position_varies_across_samples(fake_dataset):
+    """
+    The jitter has to actually move the window.
+
+    Without it every training example carries the tumour at the exact centre,
+    and the network can satisfy the loss by predicting a central blob — which
+    then fails on the full slices used at evaluation.
+    """
+    volumes, index = fake_dataset
+    ds = LungSliceDataset(volumes, index, index["splits"]["train"],
+                          sampling="all", crop="tumor", crop_size=96, seed=5)
+
+    positives = [i for i, (_, s) in enumerate(ds.samples) if s in POSITIVE]
+    centroids = set()
+    for i in positives:
+        lbl = ds[i]["label"].numpy()[0]
+        ys, xs = np.nonzero(lbl)
+        centroids.add((round(float(ys.mean()), 1), round(float(xs.mean()), 1)))
+
+    assert len(centroids) > 1, (
+        "the tumour sits at an identical position in every crop — jitter is inert")
+
+
+def test_crop_moves_rather_than_pads_at_the_edges():
+    """
+    A lesion near a border must shift the window inward, not pad it.
+
+    Padding would invent background that does not exist in the patient, and the
+    fabricated intensity would be indistinguishable from air.
+    """
+    from src.training.dataset import _crop_tumor_centered
+
+    img = np.full((1, 192, 192), 0.4, dtype=np.float32)
+    lbl = np.zeros((1, 192, 192), dtype=np.float32)
+    lbl[0, 0:10, 0:10] = 1.0                      # tumour in the top-left corner
+
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        out_img, out_lbl = _crop_tumor_centered(img, lbl, rng, 96)
+        assert out_img.shape == (1, 96, 96)
+        assert out_lbl.sum() > 0
+        # Every value comes from the source slice, so nothing was fabricated.
+        assert np.all(out_img == 0.4)
+
+
+def test_crop_keeps_all_25d_channels_aligned(fake_dataset):
+    """The window must be identical across the Z-neighbour channels."""
+    volumes, index = fake_dataset
+    ds = LungSliceDataset(volumes, index, index["splits"]["train"],
+                          sampling="all", crop="tumor", crop_size=96,
+                          n_adjacent=3, seed=7)
+
+    sample = ds[len(ds) // 2]
+    assert sample["image"].shape[0] == 3
+    assert sample["image"].shape[-2:] == (96, 96)
+
+
+def test_crop_is_reproducible_for_a_given_seed(fake_dataset):
+    volumes, index = fake_dataset
+    kwargs = dict(sampling="all", crop="tumor", crop_size=96, seed=11)
+    a = LungSliceDataset(volumes, index, index["splits"]["train"], **kwargs)
+    b = LungSliceDataset(volumes, index, index["splits"]["train"], **kwargs)
+    for i in (0, len(a) // 3, len(a) - 1):
+        assert np.array_equal(a[i]["image"].numpy(), b[i]["image"].numpy())
+
+
+def test_crop_never_reaches_validation_or_test(fake_dataset):
+    """
+    Evaluation must see the full slice.
+
+    Centring a window on the tumour requires knowing where the tumour is, which
+    at inference is precisely the unknown. A cropped validation set would report
+    a number no deployed model could reproduce.
+    """
+    import json as _json
+    from src.training.dataset import build_dataloaders
+
+    volumes, index = fake_dataset
+    preprocessed = os.path.dirname(volumes)
+    with open(os.path.join(preprocessed, "index.json"), "w") as f:
+        _json.dump(index, f)
+
+    _, datasets, _ = build_dataloaders(
+        preprocessed, batch_size=2, sampling="all", augment="none",
+        crop="tumor", crop_size=96, seed=13, num_workers=0)
+
+    assert datasets["train"].crop == "tumor"
+    assert datasets["val"].crop == "none"
+    assert datasets["test"].crop == "none"
+    assert datasets["val"][0]["image"].shape[-2:] == (192, 192)
+    assert datasets["test"][0]["image"].shape[-2:] == (192, 192)
+
+
+def test_crop_size_larger_than_the_slice_is_rejected():
+    from src.training.dataset import _crop_tumor_centered
+
+    img = np.zeros((1, 192, 192), dtype=np.float32)
+    lbl = np.zeros((1, 192, 192), dtype=np.float32)
+    with pytest.raises(ValueError):
+        _crop_tumor_centered(img, lbl, np.random.default_rng(0), 256)

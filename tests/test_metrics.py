@@ -337,3 +337,26 @@ def test_stack_slice_predictions_places_slices_correctly():
     assert stack[:, :, 3].mean() == 2.0
     assert stack[:, :, 1].sum() == 0.0
     assert stack[:, :, 4].sum() == 0.0
+
+def test_surface_metrics_can_be_skipped_without_touching_overlap():
+    """
+    HD95 and ASD dominate the cost of an evaluation, so they can be turned off
+    for comparisons decided on overlap. Everything else must come back bit for
+    bit identical, or the switch would quietly change the numbers it is supposed
+    to leave alone.
+    """
+    gt = np.zeros((40, 40, 20), dtype=np.uint8)
+    gt[10:25, 10:22, 5:14] = 1
+    pred = np.zeros_like(gt)
+    pred[12:27, 12:24, 6:15] = 1
+    pred[2:6, 2:6, 2:5] = 1                     # a detached false positive
+
+    full = compute_all_3d_metrics(pred, gt, (1.0, 1.0, 1.0))
+    fast = compute_all_3d_metrics(pred, gt, (1.0, 1.0, 1.0), surface_metrics=False)
+
+    for key in ("dice_3d", "iou_3d", "sensitivity_3d", "precision_3d",
+                "specificity_3d", "fp_components", "is_failure"):
+        assert fast[key] == full[key], f"{key} changed when surface metrics were skipped"
+
+    assert np.isfinite(full["hd95_3d"]) and np.isfinite(full["asd_3d"])
+    assert np.isnan(fast["hd95_3d"]) and np.isnan(fast["asd_3d"])
