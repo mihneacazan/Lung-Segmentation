@@ -90,13 +90,3 @@ against the reported value to prove it.
   shared slices under every one of the eight checkpoints.
 - **Threshold slider** starts at the value the run chose on validation, so moving
   it shows what that choice bought.
-
-Surface metrics are behind a checkbox because they are slow: on a 512×512×271
-volume HD95 costs about 44 s, ASD 38 s, and the false-positive component count
-19 s, against 8 s for the whole overlap set. For the reported threshold they are
-already in `test_results_per_patient.csv`; compute them here only after moving
-the threshold or enabling the component filter.
-
-Inference itself is not the bottleneck — about 4 s per patient on CPU for the
-1.6M-parameter models. The geometry round-trip is roughly 7 s. Results are cached
-per (run, patient, threshold), so only the first view of a combination waits.

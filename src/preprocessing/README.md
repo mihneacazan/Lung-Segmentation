@@ -1,8 +1,7 @@
 # Preprocessing
 
 Turns the raw Decathlon archive into the patient split and the preprocessed
-volumes that every experiment trains on. Nothing here is experiment-specific:
-these two scripts run once, and their output is what gets uploaded to Kaggle.
+volumes that every experiment trains on.
 
 | File | Role |
 |---|---|
@@ -74,8 +73,7 @@ output/preprocessing_qc.csv     per-case QC measurements
 
 **One file per patient, not one per slice.** Whole volumes are what make
 positive/negative sampling a *runtime* choice rather than something frozen on
-disk, give a 2.5D model access to a slice's Z-neighbours, and reduce Kaggle I/O
-from roughly 35,000 files to 126.
+disk, giving a 2.5D model access to a slice's Z-neighbours.
 
 ### QC
 

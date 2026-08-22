@@ -75,7 +75,7 @@ ways to fit noise.
 **The pure Tversky family does not fit this problem.** Not because it fails to find
 the tumour — sensitivity is 0.39–0.43, comparable to the baseline's 0.434 — but
 because it paints seven to eight times more volume than exists. The cause is
-structural and is worked out below.
+structural and is worked out [below](#why-tversky-cannot-be-fixed-by-tuning-β).
 
 **Field of view is a variable, not a free choice.** Handing a trained model a
 different field of view at inference than it saw during training costs a large
