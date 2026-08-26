@@ -24,7 +24,12 @@ import nibabel as nib
 from nibabel.orientations import apply_orientation
 
 from src.geometry import (
+    from_network_grid,
     get_ornt,
+    plan_from_metadata,
+    resize_plan,
+    resize_slice_2d,
+    to_network_grid,
     invert_ornt,
     reorient_to_canonical,
     restore_original_orientation,
@@ -233,3 +238,107 @@ def test_crop_drops_detached_scanner_table():
     bbox = crop_body_3d(img, margin=0)
     assert bbox["x_max"] <= 61, (
         f"bounding box reached x={bbox['x_max']}, so it swallowed the table")
+
+
+# ============================================================================
+#  CROPPED SLICE -> FIXED NETWORK GRID
+# ============================================================================
+
+@pytest.mark.parametrize("cropped_hw", [(355, 282), (440, 275), (404, 404),
+                                        (320, 306), (490, 422)])
+@pytest.mark.parametrize("mode,target,mm", [("stretch", 192, None),
+                                            ("pad", 192, None),
+                                            ("fixed_mm", 256, 2.0)])
+def test_network_grid_round_trips_to_the_cropped_size(cropped_hw, mode, target, mm):
+    """
+    Every mode must land on the grid and come back to the crop it started from.
+
+    The shapes used are real cropped extents from this dataset, including the
+    most distorted patient and a square one, because the padding offsets are
+    integer divisions and an odd difference rounds differently from an even one.
+    """
+    plan = resize_plan((*cropped_hw, 8), mode=mode, target_size=target,
+                       mm_per_px=mm)
+    slice_2d = np.random.default_rng(0).random(cropped_hw).astype(np.float32)
+
+    on_grid = to_network_grid(slice_2d, plan)
+    back = from_network_grid(on_grid, plan, cropped_hw)
+
+    assert on_grid.shape == (target, target)
+    assert back.shape == cropped_hw
+
+
+def test_stretch_is_byte_identical_to_the_previous_direct_resize():
+    """
+    The default path must reproduce the old behaviour exactly.
+
+    Twenty-one experiments were trained against a dataset built before these
+    modes existed. If `stretch` diverged from the plain resize by even a
+    rounding step, those runs would no longer be reproducible from this code.
+    """
+    slice_2d = np.random.default_rng(1).random((355, 282)).astype(np.float32)
+    plan = resize_plan((355, 282, 8), mode="stretch", target_size=192)
+
+    assert np.array_equal(to_network_grid(slice_2d, plan),
+                          resize_slice_2d(slice_2d, (192, 192), order=1))
+
+
+def test_pad_removes_the_anisotropy_that_stretch_introduces():
+    """
+    The point of `pad` is that both axes end up at the same millimetres per
+    pixel. On the worst patient in this dataset stretch scales them 1.60 apart.
+    """
+    height, width = 440, 275
+    stretch_ratio = (height / 192) / (width / 192)
+    assert stretch_ratio > 1.5, "test shape no longer exercises the problem"
+
+    plan = resize_plan((height, width, 8), mode="pad", target_size=192)
+    # A padded square is scaled by one factor, so both axes carry it equally.
+    assert plan["square_side"] == height
+    assert plan["pad_top"] == 0
+    assert plan["pad_left"] == (height - width) // 2
+
+
+def test_fixed_mm_gives_every_patient_the_same_scale():
+    """Two differently shaped patients must come out at identical mm per pixel."""
+    plans = [resize_plan((h, w, 8), mode="fixed_mm", target_size=256,
+                         mm_per_px=2.0)
+             for h, w in [(355, 282), (490, 422)]]
+
+    for plan, (h, w) in zip(plans, [(355, 282), (490, 422)]):
+        assert abs(h / plan["inner_h"] - 2.0) < 0.02
+        assert abs(w / plan["inner_w"] - 2.0) < 0.02
+
+
+def test_fixed_mm_refuses_a_scale_that_would_crop_the_patient():
+    """
+    Silently truncating a body that does not fit would lose anatomy without any
+    error, so the plan is rejected instead.
+    """
+    with pytest.raises(ValueError, match="does not fit"):
+        resize_plan((490, 422, 8), mode="fixed_mm", target_size=192,
+                    mm_per_px=2.0)
+
+
+def test_padding_is_air_not_an_invented_value():
+    """
+    Zero is -1000 HU after the window, which is what surrounds the patient
+    anyway. Padding with anything else would put a material in the image that
+    the network has to learn to ignore.
+    """
+    plan = resize_plan((100, 60, 8), mode="pad", target_size=64)
+    filled = to_network_grid(np.ones((100, 60), dtype=np.float32), plan)
+
+    assert filled.min() == 0.0, "padding is not air"
+    assert filled.max() == pytest.approx(1.0)
+
+
+def test_missing_plan_in_metadata_reads_as_stretch():
+    """Metadata written before the modes existed must keep working unchanged."""
+    plan = plan_from_metadata({"target_slice_size": [192, 192]})
+    assert plan == {"mode": "stretch", "target_size": 192}
+
+
+def test_unknown_mode_is_rejected():
+    with pytest.raises(ValueError, match="resize mode"):
+        resize_plan((100, 100, 8), mode="squash", target_size=192)

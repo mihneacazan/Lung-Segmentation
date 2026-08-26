@@ -222,7 +222,8 @@ def test_every_loss_trains(tiny_project, loss_type):
     assert np.isfinite(report["best_val_dice_soft"])
 
 
-@pytest.mark.parametrize("sampling", ["balanced", "all", "hard_negatives"])
+@pytest.mark.parametrize("sampling", ["balanced", "all", "hard_negatives",
+                                     "positives"])
 def test_every_sampling_mode_trains(tiny_project, sampling):
     report = run(tiny_project, sampling=sampling, exp_name=f"smoke_{sampling}")
     assert report["config"]["sampling"] == sampling
@@ -760,3 +761,90 @@ def test_resume_restores_training_state(tiny_project):
     report = run(tiny_project, epochs=4, exp_name="smoke_resume",
                  resume_path=str(ckpt_path))
     assert report["epochs_run"] == 4, "resume should continue, not restart"
+
+
+# ============================================================================
+#  SLICE PROTOCOLS
+# ============================================================================
+
+def test_second_protocol_scores_the_same_weights_twice(tiny_project):
+    """
+    The expensive failure this guards against: `second_eval_sampling` only runs
+    after training finishes, so on real data a mistake in it surfaces hours in,
+    with the checkpoint saved and the report never written.
+    """
+    report = run(tiny_project, sampling="positives", eval_sampling="positives",
+                 second_eval_sampling="all", exp_name="smoke_protocols")
+
+    assert "second_protocol" in report
+    second = report["second_protocol"]
+    assert second["eval_sampling"] == "all"
+    assert 0.0 <= second["optimal_threshold"] <= 1.0
+
+    # Each protocol sweeps its own threshold on its own validation slices.
+    assert "threshold_sweep" in second and second["threshold_sweep"]
+    for key in ("mean_dice_2d_tumour_slices", "mean_dice_2d_all_slices",
+                "mean_dice_3d"):
+        assert key in second["test_metrics_summary"]
+
+    # Same patients, scored twice.
+    assert (set(second["per_patient_test_metrics"])
+            == set(report["per_patient_test_metrics"]))
+
+
+def test_second_protocol_sees_more_slices_than_the_primary(tiny_project):
+    """
+    'all' must actually restore the empty slices. If both protocols quietly used
+    the same loader, the two blocks would agree exactly and the comparison the
+    experiment exists to make would be vacuous.
+    """
+    report = run(tiny_project, sampling="positives", eval_sampling="positives",
+                 second_eval_sampling="all", exp_name="smoke_protocol_gap")
+
+    primary = report["per_patient_test_metrics"]
+    second = report["second_protocol"]["per_patient_test_metrics"]
+
+    for case_id, metrics in primary.items():
+        # n_slices counts the reconstruction, identical either way; what differs
+        # is how many slices the model was actually shown, which shows up as
+        # predictions appearing on slices the primary protocol never touched.
+        assert metrics["n_slices"] == second[case_id]["n_slices"]
+
+    assert any(second[c]["dice_2d_all_slices"] != primary[c]["dice_2d_all_slices"]
+               for c in primary), \
+        "Both protocols produced identical predictions on every slice"
+
+
+def test_eval_sampling_defaults_to_every_slice(tiny_project):
+    """
+    The default must stay honest. A run that silently evaluated on tumour slices
+    would report a number two to three times higher than the same model measured
+    properly, with nothing in the output to say so.
+    """
+    from src.training.dataset import build_dataloaders
+
+    _, datasets, _ = build_dataloaders(
+        str(tiny_project / "preprocessed"), batch_size=4,
+        sampling="positives", augment="none", num_workers=0)
+
+    assert len(datasets["val"]) == SHAPE[2] * len(SPLITS["val"])
+    assert len(datasets["test"]) == SHAPE[2] * len(SPLITS["test"])
+    assert len(datasets["train"]) == len(POSITIVE) * len(SPLITS["train"])
+
+
+def test_per_slice_metrics_reach_the_benchmark_report(tiny_project):
+    """
+    The 2D views have to survive the whole reporting chain, not just exist in
+    metrics.py: per-patient rows, the macro average, and the post-processed set.
+    """
+    report = run(tiny_project, exp_name="smoke_2d_metrics")
+
+    for metrics in report["per_patient_test_metrics"].values():
+        for key in ("dice_2d_tumour_slices", "dice_2d_all_slices",
+                    "n_tumour_slices", "n_tumour_slices_with_prediction",
+                    "pp_dice_2d_tumour_slices"):
+            assert key in metrics, f"{key} missing from the per-patient metrics"
+
+    for key in ("dice_2d_tumour_slices", "dice_2d_all_slices",
+                "precision_2d_tumour_slices"):
+        assert key in report["macro_average"], f"{key} missing from macro average"

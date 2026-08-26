@@ -234,6 +234,177 @@ def resize_slice_2d(slice_2d, target_size, order=1):
 
 
 # ============================================================================
+#  CROPPED SLICE -> FIXED NETWORK GRID
+# ============================================================================
+#
+# The network needs one shape for every patient, and the body crop does not
+# supply one: cropped slices run from 230 to 490 voxels across. Three ways of
+# getting from the crop to a fixed grid are implemented, and they trade the same
+# two quantities against each other — how faithfully anatomy is shaped, and how
+# many of the grid's pixels land on it.
+#
+#   stretch   Resize the crop straight onto the grid. Every pixel is used, and
+#             nothing is padded, but the two axes are scaled by different
+#             factors whenever the crop is not square: measured over the 63
+#             patients here, up to 1.60x, so a round lesion is rendered as an
+#             ellipse whose eccentricity varies from patient to patient.
+#   pad       Pad the crop out to a square first, then resize. Anatomy keeps its
+#             proportions. The padding costs roughly 23% of the pixels that
+#             stretch would have spent on the body.
+#   fixed_mm  Resample so that one pixel is a fixed number of millimetres for
+#             every patient, then pad to the grid. This removes the between-
+#             patient scale variation as well, which the other two leave in
+#             place, and pays for it in padding: at 2.0 mm/px on a 256 grid the
+#             body covers a median 48% of the frame.
+#
+# `stretch` is the default because it is what the existing preprocessed dataset
+# and every experiment run against it used. Metadata written before these modes
+# existed carries no plan, and is read as `stretch`.
+
+RESIZE_MODES = ("stretch", "pad", "fixed_mm")
+
+
+def resize_plan(cropped_shape, mode="stretch", target_size=192, mm_per_px=None):
+    """
+    Works out how one patient's cropped slices map onto the fixed network grid.
+
+    The plan is computed once per patient and stored in its metadata, so that the
+    inverse can be applied at evaluation time without recomputing anything from
+    the volume.
+
+    Args:
+        cropped_shape (tuple): Shape of the cropped volume, (H, W, D).
+        mode (str): One of RESIZE_MODES.
+        target_size (int): Side of the square grid the network sees.
+        mm_per_px (float): Millimetres per pixel, `fixed_mm` only. The volume is
+            at 1mm isotropic by this point, so a cropped extent of N voxels is
+            N millimetres.
+
+    Returns:
+        dict: The plan, JSON-serialisable, consumed by `to_network_grid` and
+              `from_network_grid`.
+
+    Raises:
+        ValueError: If the mode is unknown, or if `fixed_mm` is asked for a
+            scale at which some patient no longer fits the grid.
+    """
+    if mode not in RESIZE_MODES:
+        raise ValueError(f"resize mode must be one of {RESIZE_MODES}, got {mode!r}")
+
+    height, width = int(cropped_shape[0]), int(cropped_shape[1])
+
+    if mode == "stretch":
+        return {"mode": "stretch", "target_size": int(target_size)}
+
+    if mode == "pad":
+        side = max(height, width)
+        return {"mode": "pad", "target_size": int(target_size),
+                "square_side": side,
+                "pad_top": (side - height) // 2,
+                "pad_left": (side - width) // 2}
+
+    if mm_per_px is None or mm_per_px <= 0:
+        raise ValueError("fixed_mm needs a positive mm_per_px")
+
+    inner_h = int(round(height / mm_per_px))
+    inner_w = int(round(width / mm_per_px))
+    if inner_h > target_size or inner_w > target_size:
+        raise ValueError(
+            f"at {mm_per_px} mm/px a {height}x{width} mm body needs "
+            f"{inner_h}x{inner_w} px, which does not fit a {target_size} grid. "
+            f"Raise target_size or mm_per_px.")
+
+    return {"mode": "fixed_mm", "target_size": int(target_size),
+            "mm_per_px": float(mm_per_px),
+            "inner_h": inner_h, "inner_w": inner_w,
+            "pad_top": (target_size - inner_h) // 2,
+            "pad_left": (target_size - inner_w) // 2}
+
+
+def to_network_grid(slice_2d, plan, order=1):
+    """
+    Maps one cropped slice onto the fixed grid described by `plan`.
+
+    Padding is filled with zero, which is air: the slice reaching this function
+    has already been through the HU window, where -1000 HU maps to 0.0, so a
+    zero border is the same material as the space around the patient rather than
+    an artificial value the network has to learn to ignore.
+
+    Args:
+        slice_2d (np.ndarray): One cropped slice, windowed and normalized.
+        plan (dict): From `resize_plan`.
+        order (int): Interpolation order, 1 for images, 0 for nearest.
+
+    Returns:
+        np.ndarray: (target_size, target_size).
+    """
+    target = plan["target_size"]
+
+    if plan["mode"] == "stretch":
+        return resize_slice_2d(slice_2d, (target, target), order=order)
+
+    if plan["mode"] == "pad":
+        side = plan["square_side"]
+        canvas = np.zeros((side, side), dtype=slice_2d.dtype)
+        top, left = plan["pad_top"], plan["pad_left"]
+        canvas[top:top + slice_2d.shape[0], left:left + slice_2d.shape[1]] = slice_2d
+        return resize_slice_2d(canvas, (target, target), order=order)
+
+    inner = resize_slice_2d(slice_2d, (plan["inner_h"], plan["inner_w"]), order=order)
+    canvas = np.zeros((target, target), dtype=inner.dtype)
+    top, left = plan["pad_top"], plan["pad_left"]
+    canvas[top:top + inner.shape[0], left:left + inner.shape[1]] = inner
+    return canvas
+
+
+def from_network_grid(slice_2d, plan, cropped_hw, order=1):
+    """
+    Inverts `to_network_grid`, returning a slice at the cropped size.
+
+    Guarantees, for any plan and any slice:
+        from_network_grid(to_network_grid(s, plan), plan, s.shape).shape == s.shape
+
+    Args:
+        slice_2d (np.ndarray): One slice on the network grid.
+        plan (dict): The same plan used going forward.
+        cropped_hw (tuple): (H, W) of the cropped volume.
+        order (int): Interpolation order.
+
+    Returns:
+        np.ndarray: (H, W).
+    """
+    height, width = int(cropped_hw[0]), int(cropped_hw[1])
+
+    if plan["mode"] == "stretch":
+        return resize_slice_2d(slice_2d, (height, width), order=order)
+
+    if plan["mode"] == "pad":
+        side = plan["square_side"]
+        square = resize_slice_2d(slice_2d, (side, side), order=order)
+        top, left = plan["pad_top"], plan["pad_left"]
+        return square[top:top + height, left:left + width]
+
+    top, left = plan["pad_top"], plan["pad_left"]
+    inner = slice_2d[top:top + plan["inner_h"], left:left + plan["inner_w"]]
+    return resize_slice_2d(inner, (height, width), order=order)
+
+
+def plan_from_metadata(metadata):
+    """
+    Reads a patient's resize plan, falling back to `stretch`.
+
+    Metadata written before the resize modes existed carries no plan, and every
+    experiment run against that dataset used the stretch path, so treating a
+    missing plan as stretch keeps those runs reproducible.
+    """
+    plan = metadata.get("resize_plan")
+    if plan:
+        return plan
+    target = int(metadata.get("target_slice_size", [192, 192])[0])
+    return {"mode": "stretch", "target_size": target}
+
+
+# ============================================================================
 #  BODY CROP
 # ============================================================================
 
@@ -340,12 +511,15 @@ def reconstruct_to_original_geometry(slice_stack, metadata, threshold=0.5,
 
     slice_stack = np.asarray(slice_stack, dtype=np.float32)
 
-    # Step 1: resize slices from 192x192 back to the cropped in-plane size
+    # Step 1: bring each slice off the network grid, back to the cropped
+    # in-plane size. Which inverse applies depends on how the forward pass got
+    # onto that grid, so the plan is read from the patient's own metadata.
     target_h, target_w, n_slices = cropped_shape
+    plan = plan_from_metadata(metadata)
     cropped_3d = np.zeros(cropped_shape, dtype=np.float32)
     for s in range(min(n_slices, slice_stack.shape[2])):
-        cropped_3d[:, :, s] = resize_slice_2d(
-            slice_stack[:, :, s], (target_h, target_w), order=1
+        cropped_3d[:, :, s] = from_network_grid(
+            slice_stack[:, :, s], plan, (target_h, target_w), order=1
         )
 
     # Step 2: un-crop into the full 1mm isotropic volume

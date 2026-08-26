@@ -41,8 +41,10 @@ from src.models.factory import build_model, MODEL_TYPES
 from src.training.losses import build_loss_function, LOSS_TYPES
 from src.training.dataset import (
     build_dataloaders,
+    build_eval_loader,
     CROP_MODES,
     DEFAULT_CROP_SIZE,
+    SAMPLING_MODES,
 )
 from src.evaluation.metrics import (
     count_model_parameters,
@@ -298,9 +300,34 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
                             num_workers=2, save_nifti=False,
                             lr_t_max=None, max_grad_norm=1.0,
                             postproc_min_fraction=0.10,
-                            tversky_alpha=0.3, tversky_beta=0.7):
+                            tversky_alpha=0.3, tversky_beta=0.7,
+                            preprocessed_name="preprocessed",
+                            metadata_name="metadata",
+                            surface_metrics=True,
+                            eval_sampling="all", second_eval_sampling=None):
     """
     Runs one complete training and evaluation experiment for a single seed.
+
+    `eval_sampling` decides which slices validation and test are drawn from, and
+    it changes what the reported number means rather than how well the model
+    does. The default 'all' faces the real distribution, where about 91% of
+    slices hold no tumour. 'positives' removes them, which removes the detection
+    half of the task and leaves only delineation; it produces a much higher
+    number that is not comparable with anything else in this project.
+
+    `second_eval_sampling` scores the same trained weights a second time under a
+    different protocol. It exists so the gap between the two can be read off one
+    run instead of being inferred across two, which would confound the protocol
+    with the seed. The second protocol gets its own threshold sweep on its own
+    validation slices: a threshold picked where every slice contains tumour is
+    far too permissive once empty slices are back, and reusing it would charge
+    the difference to the model instead of to the calibration.
+
+    `surface_metrics=False` drops HD95 and ASD from the final test evaluation.
+    They run distance transforms over each patient's full reconstruction and cost
+    roughly 160 s per patient against 7 s for everything else, which is the
+    difference between fitting a Kaggle GPU session and not. The overlap metrics
+    are bit-identical either way.
 
     `lr_t_max` sets the cosine annealing period independently of `epochs`. They
     exist as separate knobs because tying them together makes a larger budget
@@ -331,7 +358,10 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         "exp_name": exp_name, "seed": seed, "epochs": epochs,
         "batch_size": batch_size, "lr": lr, "model_type": model_type,
         "loss_type": loss_type, "augment": augment, "sampling": sampling,
+        "eval_sampling": eval_sampling,
+        "second_eval_sampling": second_eval_sampling,
         "crop": crop, "crop_size": crop_size,
+        "preprocessed_name": preprocessed_name, "metadata_name": metadata_name,
         "n_adjacent": n_adjacent, "patience": patience, "min_epochs": min_epochs,
         "lr_t_max": t_max, "max_grad_norm": max_grad_norm,
         "postproc_min_fraction": postproc_min_fraction,
@@ -341,13 +371,32 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         json.dump(exp_config, f, indent=4)
 
     # --- Data ------------------------------------------------------------
-    preprocessed_dir = os.path.join(OUTPUT_DIR, "preprocessed")
-    metadata_dir = os.path.join(OUTPUT_DIR, "metadata")
+    # Named rather than fixed, so a run can be pointed at a dataset built with a
+    # different resize mode without disturbing the default one.
+    preprocessed_dir = os.path.join(OUTPUT_DIR, preprocessed_name)
+    metadata_dir = os.path.join(OUTPUT_DIR, metadata_name)
 
     loaders, datasets, index = build_dataloaders(
         preprocessed_dir, batch_size=batch_size, sampling=sampling,
         augment=augment, crop=crop, crop_size=crop_size,
-        n_adjacent=n_adjacent, seed=seed, num_workers=num_workers)
+        n_adjacent=n_adjacent, seed=seed, num_workers=num_workers,
+        eval_sampling=eval_sampling)
+
+    # The second protocol's validation loader is built now rather than at the
+    # end, because it is also read once per epoch as a diagnostic. Its curve is
+    # logged and never acted on: early stopping follows the primary protocol,
+    # the one training was set up for, and a model selected by one objective and
+    # stopped by another is selected by neither.
+    second_val_loader = second_test_loader = None
+    if second_eval_sampling:
+        second_val_loader, _ = build_eval_loader(
+            preprocessed_dir, "val", sampling=second_eval_sampling,
+            batch_size=batch_size, n_adjacent=n_adjacent, seed=seed,
+            num_workers=num_workers)
+        second_test_loader, _ = build_eval_loader(
+            preprocessed_dir, "test", sampling=second_eval_sampling,
+            batch_size=batch_size, n_adjacent=n_adjacent, seed=seed,
+            num_workers=num_workers)
 
     n_train = len(datasets["train"])
     n_val = len(datasets["val"])
@@ -370,9 +419,19 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
           f"grad clip: {max_grad_norm or 'off'}")
     print(f"  Early stopping: patience={patience}, min_epochs={min_epochs}")
     print(f"  Slices: {n_train} train ({sampling}) | "
-          f"{n_val} val | {n_test} test")
-    print(f"  Val positive rate: {100.0 * val_pos / max(n_val, 1):.2f}% "
-          f"(real distribution, unbalanced)")
+          f"{n_val} val | {n_test} test  (eval sampling: {eval_sampling})")
+    if eval_sampling == "all":
+        print(f"  Val positive rate: {100.0 * val_pos / max(n_val, 1):.2f}% "
+              f"(real distribution, unbalanced)")
+    else:
+        print(f"  [!] Validation and test use '{eval_sampling}', not the real "
+              f"slice distribution. Scores from this run are not comparable "
+              f"with runs evaluated on every slice.")
+    if second_eval_sampling:
+        print(f"  Second protocol: '{second_eval_sampling}' "
+              f"({len(second_val_loader.dataset)} val | "
+              f"{len(second_test_loader.dataset)} test slices), scored after "
+              f"training with its own threshold sweep")
 
     # --- Model, loss, optimizer ------------------------------------------
     model = build_model(model_type, in_channels=n_adjacent, out_channels=1).to(device)
@@ -441,7 +500,7 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         val_hard = float(np.mean([v["dice_hard"] for v in val.values()])) if val else 0.0
         val_soft = float(np.mean([v["dice_soft"] for v in val.values()])) if val else 0.0
 
-        history.append({
+        record = {
             "epoch": epoch,
             "train_loss": round(train_loss, 6),
             "val_dice_soft": round(val_soft, 6),
@@ -449,7 +508,19 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
             "lr": round(optimizer.param_groups[0]["lr"], 8),
             "epoch_time_sec": round(epoch_time, 2),
             "nonfinite_batches": n_nonfinite,
-        })
+        }
+
+        second_soft = None
+        if second_val_loader is not None:
+            second = evaluate_fast(model, second_val_loader, device, threshold=0.5)
+            second_soft = (float(np.mean([v["dice_soft"] for v in second.values()]))
+                           if second else 0.0)
+            record[f"val_dice_soft_{second_eval_sampling}"] = round(second_soft, 6)
+            record[f"val_dice_hard_{second_eval_sampling}"] = (
+                round(float(np.mean([v["dice_hard"] for v in second.values()])), 6)
+                if second else 0.0)
+
+        history.append(record)
 
         marker = ""
         if val_soft > best_score:
@@ -459,9 +530,11 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         if n_nonfinite:
             marker += f"  [!] {n_nonfinite}/{n_batches} non-finite batches"
 
+        second_note = (f" | {second_eval_sampling}: {second_soft:.4f}"
+                       if second_soft is not None else "")
         print(f"  Epoch {epoch:03d}/{epochs:03d} | Loss: {train_loss:.4f} | "
-              f"Val Dice soft: {val_soft:.4f} | hard@0.5: {val_hard:.4f} | "
-              f"{epoch_time:.1f}s{marker}", flush=True)
+              f"Val Dice soft: {val_soft:.4f} | hard@0.5: {val_hard:.4f}"
+              f"{second_note} | {epoch_time:.1f}s{marker}", flush=True)
 
         save_checkpoint(model, optimizer, scheduler, scaler, epoch, best_score,
                         exp_config, history, checkpoint_path)
@@ -519,7 +592,8 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     test_metrics, test_preds, test_gts, pp_counts = evaluate_full(
         test_probs, test_times, metadata_dir, threshold=best_threshold,
         save_nifti_dir=os.path.join(exp_dir, "predictions") if save_nifti else None,
-        postproc_min_fraction=postproc_min_fraction)
+        postproc_min_fraction=postproc_min_fraction,
+        surface_metrics=surface_metrics)
     del test_probs
 
     tumor_cats = load_tumor_categories()
@@ -628,6 +702,67 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
                                      if test_metrics else 0.0),
         }
 
+    # --- Same weights, second slice protocol ------------------------------
+    if second_test_loader is not None:
+        print(f"\n{'=' * 75}")
+        print(f"  SECOND PROTOCOL: evaluation on '{second_eval_sampling}' slices")
+        print(f"{'=' * 75}")
+        print("  Same checkpoint, same reconstruction. Only which slices the "
+              "model is asked about changes.")
+
+        print(f"\n--- Threshold sweep on validation ({second_eval_sampling}) ---")
+        v_probs, v_labels, _ = collect_predictions(model, second_val_loader, device)
+        second_threshold, second_sweep = threshold_sweep(v_probs, v_labels)
+        del v_probs, v_labels
+
+        print(f"\n--- Test evaluation (threshold={second_threshold:.2f}) ---")
+        t_probs, _, t_times = collect_predictions(model, second_test_loader, device)
+        second_metrics, second_preds, second_gts, _ = evaluate_full(
+            t_probs, t_times, metadata_dir, threshold=second_threshold,
+            save_nifti_dir=None, postproc_min_fraction=postproc_min_fraction,
+            surface_metrics=surface_metrics)
+        del t_probs
+        second_averages = compute_macro_micro_averages(
+            second_metrics, second_preds, second_gts)
+        del second_preds, second_gts
+
+        def _mean2(key):
+            vals = [m[key] for m in second_metrics.values()
+                    if key in m and not np.isnan(m[key])]
+            return float(np.mean(vals)) if vals else 0.0
+
+        print(f"\n  Dice 2D, tumour slices: {_mean2('dice_2d_tumour_slices'):.4f}")
+        print(f"  Dice 2D, every slice:   {_mean2('dice_2d_all_slices'):.4f}")
+        print(f"  Dice 3D, per patient:   {_mean2('dice_3d'):.4f}")
+        print(f"  Sensitivity: {_mean2('sensitivity_3d'):.4f} | "
+              f"Precision: {_mean2('precision_3d'):.4f}")
+        print(f"  Threshold:   {second_threshold:.2f} "
+              f"(swept separately, primary was {best_threshold:.2f})")
+        if second_eval_sampling == "positives":
+            print("\n  [!] Only tumour-bearing slices were fed to the model, so "
+                  "every slice it was not shown reconstructs as empty. Read "
+                  "'Dice 2D, tumour slices' here: it is the one figure this "
+                  "protocol measures cleanly. The 3D and all-slice numbers "
+                  "inherit those untouched slices and are not comparable with "
+                  "a run that saw the whole volume.")
+        print("=" * 75)
+
+        benchmark["second_protocol"] = {
+            "eval_sampling": second_eval_sampling,
+            "optimal_threshold": second_threshold,
+            "threshold_sweep": {str(k): v for k, v in second_sweep.items()},
+            "test_metrics_summary": {
+                "mean_dice_2d_tumour_slices": _mean2("dice_2d_tumour_slices"),
+                "mean_dice_2d_all_slices": _mean2("dice_2d_all_slices"),
+                "mean_dice_3d": _mean2("dice_3d"),
+                "mean_sensitivity": _mean2("sensitivity_3d"),
+                "mean_precision": _mean2("precision_3d"),
+            },
+            "macro_average": second_averages["macro"],
+            "micro_average": second_averages["micro"],
+            "per_patient_test_metrics": second_metrics,
+        }
+
     report_path = os.path.join(exp_dir, "benchmark_report.json")
     with open(report_path, "w") as f:
         json.dump(benchmark, f, indent=4, default=float)
@@ -696,7 +831,21 @@ def main():
     parser.add_argument("--model_type", type=str, default="unet", choices=MODEL_TYPES)
     parser.add_argument("--loss_type", type=str, default="dice_ce", choices=LOSS_TYPES)
     parser.add_argument("--sampling", type=str, default="balanced",
-                        choices=["balanced", "all", "hard_negatives"])
+                        choices=list(SAMPLING_MODES))
+    parser.add_argument("--eval_sampling", type=str, default="all",
+                        choices=list(SAMPLING_MODES),
+                        help="Which slices validation and test draw from. 'all' "
+                             "faces the real distribution and is what every "
+                             "reported number in this project uses. Anything "
+                             "else measures a restricted task and is not "
+                             "comparable with those numbers.")
+    parser.add_argument("--second_eval_sampling", type=str, default=None,
+                        choices=list(SAMPLING_MODES),
+                        help="Score the same trained weights a second time "
+                             "under this protocol, with its own threshold "
+                             "sweep. Reading both off one run keeps the "
+                             "protocol difference from being confounded with "
+                             "the seed.")
     parser.add_argument("--augment", type=str, default="anatomic",
                         choices=["none", "standard", "anatomic"])
     parser.add_argument("--crop", type=str, default="none", choices=CROP_MODES,
@@ -746,6 +895,8 @@ def main():
         epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
         model_type=args.model_type, loss_type=args.loss_type,
         augment=args.augment, sampling=args.sampling,
+        eval_sampling=args.eval_sampling,
+        second_eval_sampling=args.second_eval_sampling,
         crop=args.crop, crop_size=args.crop_size, n_adjacent=args.n_adjacent,
         patience=args.patience, min_epochs=args.min_epochs,
         exp_name=args.exp_name, num_workers=args.num_workers,

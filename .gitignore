@@ -19,13 +19,17 @@ archive/*
 # would just be a second, driftable copy of something reproducible.
 output/preprocessed/
 output/results.zip
+output/slice_overlays/
+output/slice_overlays.zip
+output/slice_overlays_compare/
+output/slice_overlays_compare.zip
 
-# Working files not part of the published project: personal notes, Kaggle
-# notebook drafts and their logs, downloaded result archives already unpacked
-# into output/experiments/, and Radu's review (addressed to him, not public).
+# Working files not part of the published project: personal notes, drafts, Kaggle
+# notebooks and their logs, downloaded result archives already unpacked into
+# output/experiments/, and write-ups addressed to a particular reader.
 Stages.md
-Readme_Radu.md
-Review_Radu.md
+*_Radu.md
+special_experiments/
 docs/
 kaggle_notebooks/
 kaggle_upload/

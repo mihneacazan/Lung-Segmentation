@@ -355,7 +355,7 @@ def run_eda():
 def print_console_summary(df: pd.DataFrame):
     """Prints a structured summary of the audit results to the console."""
     print("\n" + "="*80)
-    print("           DETAILED EDA & GEOMETRY AUDIT RESULTS FOR PROFESSOR")
+    print("           DETAILED EDA & GEOMETRY AUDIT RESULTS")
     print("="*80)
     
     print("\n1. INTEGRITY & GEOMETRY CHECKS:")

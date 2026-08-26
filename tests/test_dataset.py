@@ -466,3 +466,52 @@ def test_crop_size_larger_than_the_slice_is_rejected():
     lbl = np.zeros((1, 192, 192), dtype=np.float32)
     with pytest.raises(ValueError):
         _crop_tumor_centered(img, lbl, np.random.default_rng(0), 256)
+
+
+def test_positives_sampling_keeps_only_tumour_slices(fake_dataset):
+    """'positives' is the whole positive set and nothing else."""
+    volumes, index = fake_dataset
+    ds = LungSliceDataset(volumes, index, index["splits"]["train"],
+                          sampling="positives")
+    n_patients = len(index["splits"]["train"])
+
+    assert len(ds) == len(POSITIVE) * n_patients
+    assert all(s in POSITIVE for _, s in ds.samples)
+
+
+def test_positives_sampling_is_stable_across_epochs(fake_dataset):
+    """
+    Unlike the balanced modes, there is nothing to redraw: every qualifying slice
+    is already in. A sample list that changed between epochs would mean negatives
+    had leaked in.
+    """
+    volumes, index = fake_dataset
+    ds = LungSliceDataset(volumes, index, index["splits"]["train"],
+                          sampling="positives")
+    first = list(ds.samples)
+    ds.set_epoch(7)
+    assert list(ds.samples) == first
+
+
+def test_positives_is_a_strict_subset_of_balanced(fake_dataset):
+    """
+    The guard against 'positives' being silently treated as one of the balanced
+    modes: it must contain the positives those modes contain, and none of the
+    negatives they add.
+    """
+    volumes, index = fake_dataset
+    positives = LungSliceDataset(volumes, index, index["splits"]["train"],
+                                 sampling="positives")
+    balanced = LungSliceDataset(volumes, index, index["splits"]["train"],
+                                sampling="balanced", seed=3)
+
+    assert set(positives.samples) < set(balanced.samples)
+    assert len(positives) * 2 == len(balanced)
+
+
+def test_unknown_sampling_mode_is_rejected(fake_dataset):
+    """A typo must fail loudly rather than falling through to a default."""
+    volumes, index = fake_dataset
+    with pytest.raises(ValueError, match="sampling"):
+        LungSliceDataset(volumes, index, index["splits"]["train"],
+                         sampling="positive")

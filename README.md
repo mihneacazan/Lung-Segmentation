@@ -213,10 +213,27 @@ python -m src.evaluation.evaluate \
 ```
 
 Reported per patient: Dice, IoU, sensitivity, precision, specificity, HD95 (mm),
-ASD (mm), false-positive connected components, failure flag, inference time.
-Reported in aggregate: macro-average, micro-average, and a breakdown by tumour
-size. `--save_nifti` writes predictions carrying the patient's original affine,
-so they overlay on the source CT in any viewer.
+ASD (mm), false-positive connected components, failure flag, inference time, and
+the same overlap scored per slice — once over tumour-bearing slices only, once
+over every slice. Reported in aggregate: macro-average, micro-average, and a
+breakdown by tumour size. `--save_nifti` writes predictions carrying the
+patient's original affine, so they overlay on the source CT in any viewer.
+
+The headline number this project quotes is 3D Dice per patient, where a false
+positive anywhere in the scan counts against the score. Much of the pulmonary
+nodule literature quotes per-slice or per-lesion Dice instead, which is
+systematically higher on the same prediction. `hierarchical_report.py` scores
+every existing checkpoint at all four granularities at once, so the two can be
+compared without re-training:
+
+```bash
+python -m src.evaluation.hierarchical_report --runs all
+```
+
+Measured across all 21 runs, per-slice tumour Dice and per-patient Dice rank the
+models **almost independently** — see
+[metric granularity](EXPERIMENTS.md#metric-granularity) for why, and for the
+configuration that tops one table while sitting last in the other.
 
 ---
 
@@ -345,10 +362,12 @@ src/
     factory.py               --model_type dispatch
     unet_2d.py  attention_unet.py  segresnet.py
   evaluation/
-    metrics.py               3D metrics, threshold sweep, reporting
+    metrics.py               3D and per-slice metrics, threshold sweep, reporting
     evaluate.py              standalone evaluation CLI
+    hierarchical_report.py   every checkpoint scored per slice, lesion and patient
   visualization/
     overlay_check.py         image/mask alignment overlays
+    slice_overlays.py        per-slice mask overlays, and the resize-mode comparison
     visualizer.py            interactive raw-CT browser (Streamlit)
     prediction_viewer.py     interactive checkpoint/prediction browser (Streamlit)
 tests/                       regression suite
@@ -368,6 +387,7 @@ output/
   metadata/                                         per-patient data for inverting the pipeline
   preprocessing_qc.csv                               per-case QC (round-trip Dice, etc.)
   experiments/{exp_name}/seed_{seed}/                one directory per run — see EXPERIMENTS.md
+  hierarchical_report.{json,csv}                     all runs scored at four granularities
 ```
 
 `output/preprocessed/` (the `.npy` volumes training reads from) is regenerated

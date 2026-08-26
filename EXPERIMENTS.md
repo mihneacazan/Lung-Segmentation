@@ -126,6 +126,143 @@ all, and nothing stops the network from painting everywhere.
 
 ---
 
+## Metric granularity
+
+Every number above is 3D Dice per patient: one score per reconstructed volume,
+where a false positive anywhere in the scan counts against it. Much of the
+pulmonary nodule literature reports per-slice or per-lesion Dice instead, and
+those read systematically higher on the same prediction. Comparing across the two
+without saying which is which is how a model that fires on most of the empty
+slices comes to look better than one that does not.
+
+`src/evaluation/hierarchical_report.py` scores every checkpoint at four
+granularities at once, from the same reconstructions, so the comparison needs no
+re-training:
+
+| view | what it measures | what it cannot see |
+|---|---|---|
+| 2D, tumour slices | delineation, given that a lesion is present | every false positive on an empty slice |
+| 2D, every slice | the above, plus the empty slices | nothing — but see the ceiling below |
+| 3D, per lesion | one score per ground-truth component | false positives away from every lesion |
+| 3D, per patient | what this project quotes | — |
+
+```bash
+python -m src.evaluation.hierarchical_report --runs all
+```
+
+| Configuration | 2D, tumour slices | 2D, every slice | 3D, per lesion | 3D, per patient | slices failed | false alarms |
+|---|---:|---:|---:|---:|---:|---:|
+| **baseline** — `all` + `anatomic` + `dice_ce` | 0.3981 | 0.9053 | 0.1387 | 0.5070 | 43% | 5% |
+| U-Net, `lr=3e-4` | 0.3597 | 0.9042 | 0.1512 | 0.4642 | 44% | 5% |
+| 2.5D, `n_adjacent=3` | 0.3687 | 0.9060 | 0.1735 | 0.4259 | 42% | 5% |
+| SegResNet, `lr=3e-4` | 0.3619 | 0.8818 | 0.1060 | 0.4180 | 36% | 7% |
+| crop 96, Attention U-Net | 0.3146 | 0.9065 | 0.1091 | 0.3998 | 44% | 4% |
+| DiceFocal | 0.3092 | 0.8858 | 0.0876 | 0.3536 | 44% | 6% |
+| crop 96, SegResNet | 0.3128 | 0.8606 | 0.0930 | 0.3494 | 47% | 9% |
+| `hard_negatives`, SegResNet | 0.2879 | 0.8486 | 0.0868 | 0.3258 | 51% | 10% |
+| `hard_negatives`, 2.5D | 0.3168 | 0.8684 | 0.0912 | 0.3203 | 47% | 8% |
+| Attention U-Net | 0.2692 | 0.9071 | 0.0952 | 0.3155 | 60% | 4% |
+| Attention U-Net, 50 ep / patience 10 | 0.2692 | 0.9071 | 0.0952 | 0.3155 | 60% | 4% |
+| `hard_negatives`, Attention U-Net | 0.2561 | 0.8737 | 0.0946 | 0.3050 | 53% | 7% |
+| `balanced` sampling | 0.2724 | 0.8865 | 0.0853 | 0.3023 | 51% | 6% |
+| `hard_negatives`, U-Net | 0.3033 | 0.8072 | 0.1388 | 0.2659 | 49% | 15% |
+| no augmentation | 0.2787 | 0.8328 | 0.1443 | 0.2648 | 55% | 12% |
+| crop 96, 2.5D | 0.3448 | 0.4258 | 0.1472 | 0.1601 | 39% | 57% |
+| crop 96, U-Net | 0.3319 | 0.2996 | 0.2237 | 0.1398 | 36% | 71% |
+| Focal Tversky (β=0.7) | 0.3972 | 0.3782 | 0.1609 | 0.1043 | 40% | 63% |
+| Tversky (β=0.6) | 0.4062 | 0.4076 | 0.1631 | 0.0885 | 36% | 59% |
+| Focal Tversky (β=0.6) | 0.4167 | 0.2936 | 0.1445 | 0.0864 | 35% | 72% |
+| Tversky (β=0.7) | 0.3627 | 0.5140 | 0.1174 | 0.0771 | 44% | 47% |
+
+Sorted by the column this project quotes. `slices failed` is the share of
+tumour-bearing slices scoring below 0.10; `false alarms` is the share of empty
+slices carrying any prediction at all.
+
+### The two views rank the models almost independently
+
+Across the 21 runs, per-slice tumour Dice and per-patient Dice correlate at
+**r = −0.265** (Spearman **−0.112**). They are not two readings of the same
+quantity — they are close to unrelated, and where they do relate, it is the wrong
+way round.
+
+The mechanism is visible in the last column. Per-slice tumour Dice correlates
+**positively** with the false-alarm rate (**r = +0.586**), while per-patient Dice
+correlates negatively with it (**r = −0.880**). A model that paints more widely
+scores *better* on tumour slices, because the slices where that costs it are
+exactly the ones the metric drops.
+
+The three highest per-slice scores make the point without any statistics:
+
+| Configuration | 2D, tumour slices | rank | 3D, per patient | rank | false alarms |
+|---|---:|---:|---:|---:|---:|
+| Focal Tversky (β=0.6) | 0.4167 | **1 / 21** | 0.0864 | **20 / 21** | 72% |
+| Tversky (β=0.6) | 0.4062 | **2 / 21** | 0.0885 | **19 / 21** | 59% |
+| **baseline** | 0.3981 | 3 / 21 | **0.5070** | **1 / 21** | 5% |
+
+The two configurations at the top of the per-slice table are the ones
+[shown above](#why-tversky-cannot-be-fixed-by-tuning-β) to have exactly zero
+gradient on empty slices — 90% of the training data produces no learning signal,
+and nothing stops the network from painting everywhere. Judged per slice, that
+pathology reads as the best delineation in the project. Judged per patient, it
+reads as the worst model in the project. Both readings are arithmetically
+correct.
+
+### What each of the other views is worth
+
+**Per-slice over every slice tracks per-patient Dice** (r = +0.877, Spearman
++0.765), because the empty slices are back and false positives cost something
+again. It is the one per-slice figure that can be quoted beside a per-patient
+number without misleading. It sits high in absolute terms — 0.9071 at the top —
+for a reason that has nothing to do with model quality: about 91% of slices in
+these volumes hold no tumour, and a slice correctly left empty scores 1.0 by
+convention. Most of that average is the model being correctly silent.
+
+**Per-lesion Dice is degenerate on this dataset**, and the report says so rather
+than hiding it. Every test patient has one component holding 99.4% or more of the
+tumour volume; the remaining 34 of 44 ground-truth components are annotation
+fragments, mostly a single voxel. Unfiltered they score zero and drag the mean to
+0.1387 for the baseline. Filtered at 100 voxels they vanish and the metric
+collapses onto per-patient Dice — 0.5435 against 0.5070. Either way it carries no
+information here that per-patient Dice does not already carry, which is itself
+worth being able to demonstrate rather than assert. It also correlates
+*negatively* with per-patient Dice (r = −0.359), for the same reason the per-slice
+view does: an over-segmenting model covers the fragments too.
+
+### The spread each view allows
+
+| view | range across 21 runs | spread |
+|---|---|---:|
+| 2D, tumour slices | 0.2561 – 0.4167 | 0.161 |
+| 3D, per lesion | 0.0853 – 0.2237 | 0.138 |
+| 3D, per patient | 0.0771 – 0.5070 | 0.430 |
+| 2D, every slice | 0.2936 – 0.9071 | 0.614 |
+
+Per-slice tumour Dice compresses the entire benchmark into a 0.16-wide band. The
+worst model in the project and the best sit 0.16 apart on it, against 0.43 on the
+metric that charges for false positives. A metric that cannot separate a model
+predicting almost nothing extra from one predicting seven times the real tumour
+volume is not measuring the thing this task is about.
+
+### Post-processing moves the views in opposite directions
+
+Dropping predicted connected components below 10% of the largest, averaged over
+all 21 runs:
+
+| view | raw | filtered | Δ |
+|---|---:|---:|---:|
+| 2D, tumour slices | 0.3304 | 0.2957 | −0.035 |
+| 2D, every slice | 0.7381 | 0.8590 | **+0.121** |
+| 3D, per patient | 0.2852 | 0.2947 | +0.010 |
+| 3D, per lesion | 0.1261 | 0.1104 | −0.016 |
+
+The filter removes satellite predictions, which live overwhelmingly on slices
+away from the tumour. So it barely touches the tumour slices — and slightly hurts
+them, by occasionally deleting a genuine disconnected piece — while cleaning up
+the empty slices dramatically. The direction of the post-processing verdict
+depends on which view is asked, which is the argument for reporting all of them.
+
+---
+
 ## The controlled experiments
 
 ### 1 — DiceCE + balanced sampling
@@ -728,6 +865,16 @@ layer explains the extremes but not the whole ordering, and Gaussian blending
 across overlapping windows smooths the probability map independently of that.
 Separating them would mean re-running the matrix with the blending weights flat,
 or with the normalisation layers swapped between architectures.
+
+**The architecture ranking rests on single seeds.** Only the baseline was run
+three times, and its spread — 0.5069 / 0.4751 / 0.4737, standard deviation 0.0153
+— is the only estimate of run-to-run noise this project has. 2.5D at 0.4259 and
+SegResNet at 0.4181 sit 0.008 apart on one seed each, half a standard deviation,
+and the paired tests already place both inside the noise against the baseline. The
+ordering between them is therefore not established, and reading the table as a
+ranking of the three non-baseline architectures reads more into it than the
+measurements support. Two more seeds on 2.5D would be the cheapest way to find out
+how wide the intervals actually are.
 
 ---
 

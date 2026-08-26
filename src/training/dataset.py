@@ -144,6 +144,14 @@ AUGMENTATIONS = {
 
 CROP_MODES = ("none", "tumor")
 
+# Which slices a split draws from. The first three are training strategies that
+# trade class balance against how much negative anatomy the model ever sees.
+# 'positives' is different in kind: it removes the detection problem altogether,
+# leaving only delineation. A model trained on it has never been shown an empty
+# slice and so has no reason to leave one empty, which makes it useful for
+# measuring one half of the task in isolation and useless as a deployable model.
+SAMPLING_MODES = ("all", "balanced", "hard_negatives", "positives")
+
 # 96 x 96 out of the preprocessed 192 x 192. The largest tumour bounding box in
 # the training split measures 38 x 57 px at 1 mm spacing, so this holds every
 # lesion in the dataset with surrounding context to spare, and it stays divisible
@@ -228,8 +236,10 @@ class LungSliceDataset(Dataset):
         volumes_dir (str): Directory holding {case_id}_img.npy / _lbl.npy.
         index (dict): Parsed output/preprocessed/index.json.
         case_ids (list): Patients belonging to this split.
-        sampling (str): 'all', 'balanced', or 'hard_negatives'. Only meaningful
-            for training; evaluation splits must use 'all'.
+        sampling (str): 'all', 'balanced', 'hard_negatives', or 'positives'.
+            Evaluation splits normally use 'all'; 'positives' is the one
+            exception, and only for the deliberately restricted protocol that
+            asks how well a model delineates given that a lesion is present.
         augment (str): 'none', 'standard', or 'anatomic'.
         crop (str): 'none' for the full slice, or 'tumor' for a tumour-centred
             window. Training only; evaluation splits must use 'none'.
@@ -243,7 +253,7 @@ class LungSliceDataset(Dataset):
                  n_adjacent=1, seed=42):
         if n_adjacent % 2 != 1:
             raise ValueError(f"n_adjacent must be odd, got {n_adjacent}")
-        if sampling not in ("all", "balanced", "hard_negatives"):
+        if sampling not in SAMPLING_MODES:
             raise ValueError(f"Unknown sampling mode: {sampling}")
         if augment not in AUGMENTATIONS:
             raise ValueError(f"Unknown augment mode: {augment}")
@@ -291,6 +301,12 @@ class LungSliceDataset(Dataset):
 
             if self.sampling == "all":
                 chosen = range(n_slices)
+            elif self.sampling == "positives":
+                # Fixed across epochs: there is nothing to redraw, since every
+                # slice that qualifies is already in. A patient whose tumour was
+                # lost in preprocessing contributes nothing and simply drops out
+                # of the split rather than being silently counted as empty.
+                chosen = list(positives)
             else:
                 body = set(info["body_slices"])
                 negatives = sorted(body - set(positives))
@@ -387,14 +403,21 @@ def load_index(preprocessed_dir):
 def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
                       augment="anatomic", crop="none",
                       crop_size=DEFAULT_CROP_SIZE, n_adjacent=1, seed=42,
-                      num_workers=2):
+                      num_workers=2, eval_sampling="all"):
     """
     Builds the train, validation, and test DataLoaders.
 
-    Sampling, augmentation and cropping apply to the training split only.
-    Validation and test always use every slice, unaugmented and at full size, so
-    that model selection and the final numbers are measured against the real
-    class distribution and the real field of view.
+    Augmentation and cropping apply to the training split only. Validation and
+    test are unaugmented and at full size, so the final numbers are measured
+    against the real field of view.
+
+    They also default to every slice, which is the honest setting: model
+    selection and the reported score then face the real class distribution,
+    where roughly 91% of slices contain no tumour and a false positive on any of
+    them costs something. `eval_sampling` exists to relax that deliberately, for
+    the restricted protocol that scores delineation alone. Anything other than
+    'all' produces a number that is not comparable with the rest of this
+    project's results and has to be labelled as such wherever it is quoted.
 
     Args:
         preprocessed_dir (str): Path to output/preprocessed.
@@ -406,6 +429,7 @@ def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
         n_adjacent (int): 1 for 2D, 3 or 5 for 2.5D.
         seed (int): Base seed.
         num_workers (int): DataLoader worker processes.
+        eval_sampling (str): Slice selection for validation and test.
 
     Returns:
         dict: {'train': DataLoader, 'val': DataLoader, 'test': DataLoader}
@@ -420,11 +444,11 @@ def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
             n_adjacent=n_adjacent, seed=seed),
         "val": LungSliceDataset(
             volumes_dir, index, index["splits"]["val"],
-            sampling="all", augment="none", crop="none",
+            sampling=eval_sampling, augment="none", crop="none",
             n_adjacent=n_adjacent, seed=seed),
         "test": LungSliceDataset(
             volumes_dir, index, index["splits"]["test"],
-            sampling="all", augment="none", crop="none",
+            sampling=eval_sampling, augment="none", crop="none",
             n_adjacent=n_adjacent, seed=seed),
     }
 
@@ -444,3 +468,36 @@ def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
                            persistent_workers=num_workers > 0),
     }
     return loaders, datasets, index
+
+
+def build_eval_loader(preprocessed_dir, split, sampling="all", batch_size=16,
+                      n_adjacent=1, seed=42, num_workers=2):
+    """
+    Builds one unaugmented evaluation loader, independently of `build_dataloaders`.
+
+    This exists so a single trained model can be scored under two slice
+    protocols in one run. Calling `build_dataloaders` twice would work but would
+    also rebuild the training split, which for the sampling modes that redraw
+    negatives means paying for a sample list nobody reads.
+
+    Args:
+        preprocessed_dir (str): Path to output/preprocessed.
+        split (str): 'train', 'val', or 'test'.
+        sampling (str): Slice selection, see `SAMPLING_MODES`.
+        batch_size (int): Mini-batch size.
+        n_adjacent (int): 1 for 2D, 3 or 5 for 2.5D.
+        seed (int): Base seed.
+        num_workers (int): DataLoader worker processes.
+
+    Returns:
+        tuple: (DataLoader, LungSliceDataset)
+    """
+    index = load_index(preprocessed_dir)
+    dataset = LungSliceDataset(
+        os.path.join(preprocessed_dir, "volumes"), index, index["splits"][split],
+        sampling=sampling, augment="none", crop="none",
+        n_adjacent=n_adjacent, seed=seed)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True,
+                        persistent_workers=num_workers > 0)
+    return loader, dataset

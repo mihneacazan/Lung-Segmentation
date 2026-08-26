@@ -39,6 +39,7 @@ from src.config import OUTPUT_DIR, resolve_nifti_path
 from src.models.factory import build_model, MODEL_TYPES
 from src.training.dataset import build_dataloaders
 from src.evaluation.metrics import (
+    compute_2d_slice_metrics,
     compute_all_3d_metrics,
     filter_predicted_components,
     reconstruct_patient_3d_volume,
@@ -267,6 +268,11 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
 
         metrics = compute_all_3d_metrics(pred_3d, gt_3d, spacing,
                                          surface_metrics=surface_metrics)
+        # Per-slice views of the same prediction. Much of the nodule literature
+        # reports Dice this way, so carrying both makes this project's numbers
+        # comparable with published ones without a second scoring pass. They
+        # cost roughly a tenth of a second per patient.
+        metrics.update(compute_2d_slice_metrics(pred_3d, gt_3d))
         metrics["inference_time_sec"] = inference_times.get(case_id, 0.0)
         metrics["gt_empty"] = bool(gt_3d.sum() == 0)
         metrics["pred_empty"] = bool(pred_3d.sum() == 0)
@@ -276,6 +282,7 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
                 pred_3d, min_fraction=postproc_min_fraction)
             pp_metrics = compute_all_3d_metrics(pred_pp, gt_3d, spacing,
                                                 surface_metrics=surface_metrics)
+            pp_metrics.update(compute_2d_slice_metrics(pred_pp, gt_3d))
             for key, value in pp_metrics.items():
                 metrics[f"pp_{key}"] = value
             metrics["pp_components_removed"] = n_removed
@@ -311,7 +318,8 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
 def print_report(title, patient_metrics, averages, strat, threshold):
     """Prints the aggregate metric report for a split."""
     def _mean(key):
-        vals = [m[key] for m in patient_metrics.values() if key in m]
+        vals = [m[key] for m in patient_metrics.values()
+                if key in m and not np.isnan(m[key])]
         return float(np.mean(vals)) if vals else 0.0
 
     failures = sum(1 for m in patient_metrics.values() if m["is_failure"])
@@ -335,6 +343,29 @@ def print_report(title, patient_metrics, averages, strat, threshold):
     print(f"  Empty GT masks:  {empty_gt} | empty predictions: {empty_pred}")
     print(f"\n  Macro Dice: {averages['macro']['dice_3d']:.4f} | "
           f"Micro Dice: {averages['micro']['dice_3d']:.4f}")
+
+    # The same predictions scored per slice. Printed under its own heading and
+    # never on the same line as the 3D numbers, because the two are routinely
+    # confused across papers and the all-slice figure is far higher for reasons
+    # that have nothing to do with the model being better.
+    if any("dice_2d_all_slices" in m for m in patient_metrics.values()):
+        n_pos = sum(m.get("n_tumour_slices", 0) for m in patient_metrics.values())
+        n_hit = sum(m.get("n_tumour_slices_with_prediction", 0)
+                    for m in patient_metrics.values())
+        print("\n  Per-slice view of the same predictions:")
+        print(f"    tumour slices only   Dice={_mean('dice_2d_tumour_slices'):.4f}  "
+              f"IoU={_mean('iou_2d_tumour_slices'):.4f}  "
+              f"Sens={_mean('sensitivity_2d_tumour_slices'):.4f}  "
+              f"Prec={_mean('precision_2d_tumour_slices'):.4f}")
+        print(f"    every slice          Dice={_mean('dice_2d_all_slices'):.4f}  "
+              f"IoU={_mean('iou_2d_all_slices'):.4f}  "
+              f"Sens={_mean('sensitivity_2d_all_slices'):.4f}  "
+              f"Prec={_mean('precision_2d_all_slices'):.4f}")
+        print(f"    {n_hit}/{n_pos} tumour slices received a prediction; "
+              f"the rest are excluded from precision, not scored 1.0")
+        print(f"    slice failure rate {100 * _mean('failure_rate_2d'):.1f}%  |  "
+              f"false alarms on {100 * _mean('false_alarm_rate_2d'):.1f}% "
+              f"of empty slices")
 
     print("\n  By tumour size:")
     for cat in ("small", "medium", "large"):
@@ -363,13 +394,16 @@ def print_postproc_delta(patient_metrics):
         return
 
     def _mean(key):
-        vals = [m[key] for m in patient_metrics.values() if key in m]
+        vals = [m[key] for m in patient_metrics.values()
+                if key in m and not np.isnan(m[key])]
         return float(np.mean(vals)) if vals else 0.0
 
     pairs = [("Dice 3D", "dice_3d", 4), ("IoU 3D", "iou_3d", 4),
              ("Sensitivity", "sensitivity_3d", 4), ("Precision", "precision_3d", 4),
              ("HD95 (mm)", "hd95_3d", 2), ("ASD (mm)", "asd_3d", 2),
-             ("FP components", "fp_components", 2)]
+             ("FP components", "fp_components", 2),
+             ("Dice 2D tumour", "dice_2d_tumour_slices", 4),
+             ("Dice 2D all", "dice_2d_all_slices", 4)]
 
     removed = _mean("pp_components_removed")
     print(f"\n  Post-processing (components < 10% of largest dropped, "

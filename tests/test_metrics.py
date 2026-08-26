@@ -360,3 +360,124 @@ def test_surface_metrics_can_be_skipped_without_touching_overlap():
 
     assert np.isfinite(full["hd95_3d"]) and np.isfinite(full["asd_3d"])
     assert np.isnan(fast["hd95_3d"]) and np.isnan(fast["asd_3d"])
+
+
+# ============================================================================
+#  PER-SLICE METRICS
+# ============================================================================
+
+def _slices(spec):
+    """
+    Builds a (16, 16, N) pred/gt pair from a compact per-slice description.
+
+    Each entry is (gt_box, pred_box), where a box is None for empty or a
+    (row0, row1, col0, col1) tuple.
+    """
+    from src.evaluation.metrics import compute_2d_slice_metrics  # noqa: F401
+
+    n = len(spec)
+    gt = np.zeros((16, 16, n), dtype=np.uint8)
+    pred = np.zeros((16, 16, n), dtype=np.uint8)
+    for i, (g, p) in enumerate(spec):
+        for box, vol in ((g, gt), (p, pred)):
+            if box is not None:
+                r0, r1, c0, c1 = box
+                vol[r0:r1, c0:c1, i] = 1
+    return pred, gt
+
+
+def test_missed_tumour_slice_does_not_earn_perfect_precision():
+    """
+    The regression guard for the convention that inflated this project's reported
+    2D precision: a tumour slice with no prediction has no precision to measure,
+    so it must be excluded from the average rather than scored 1.0.
+    """
+    from src.evaluation.metrics import compute_2d_slice_metrics
+
+    # One slice segmented perfectly, one tumour slice missed entirely.
+    pred, gt = _slices([((4, 8, 4, 8), (4, 8, 4, 8)),
+                        ((4, 8, 4, 8), None)])
+    m = compute_2d_slice_metrics(pred, gt)
+
+    assert m["n_tumour_slices"] == 2
+    assert m["n_tumour_slices_with_prediction"] == 1
+    # Averaging the missed slice in as 1.0 would also give 1.0 here, so the
+    # discriminating case is the imperfect one below.
+    assert m["dice_2d_tumour_slices"] == pytest.approx(0.5)
+    assert m["sensitivity_2d_tumour_slices"] == pytest.approx(0.5)
+    assert m["precision_2d_tumour_slices"] == pytest.approx(1.0)
+
+
+def test_precision_average_ignores_slices_without_predictions():
+    """Only the slices that actually predicted something set the precision."""
+    from src.evaluation.metrics import compute_2d_slice_metrics
+
+    # Slice 0: 16 true positives out of 32 predicted -> precision 0.5.
+    # Slice 1: tumour present, nothing predicted -> no precision to measure.
+    pred, gt = _slices([((4, 8, 4, 8), (4, 8, 4, 12)),
+                        ((4, 8, 4, 8), None)])
+    m = compute_2d_slice_metrics(pred, gt)
+
+    assert m["precision_2d_tumour_slices"] == pytest.approx(0.5)
+    # The old convention averaged 0.5 with a vacuous 1.0 and reported 0.75.
+    assert m["precision_2d_tumour_slices"] < 0.75
+
+
+def test_empty_slice_left_empty_scores_as_agreement():
+    """
+    Dice keeps the usual convention, and this is why the all-slice average reads
+    so high: most slices in a lung volume hold no tumour.
+    """
+    from src.evaluation.metrics import compute_2d_slice_metrics
+
+    pred, gt = _slices([(None, None), (None, None), ((4, 8, 4, 8), (4, 8, 4, 8))])
+    m = compute_2d_slice_metrics(pred, gt)
+
+    assert m["dice_2d_all_slices"] == pytest.approx(1.0)
+    assert m["dice_2d_tumour_slices"] == pytest.approx(1.0)
+    assert m["n_tumour_slices"] == 1 and m["n_slices"] == 3
+    assert m["false_alarm_rate_2d"] == pytest.approx(0.0)
+
+
+def test_false_alarms_are_invisible_to_the_tumour_slice_view():
+    """
+    The reason both aggregations are reported. A prediction on an empty slice
+    cannot change the tumour-slice average, and must change the all-slice one.
+    """
+    from src.evaluation.metrics import compute_2d_slice_metrics
+
+    clean, gt = _slices([((4, 8, 4, 8), (4, 8, 4, 8)), (None, None)])
+    noisy, _ = _slices([((4, 8, 4, 8), (4, 8, 4, 8)), (None, (0, 3, 0, 3))])
+
+    a = compute_2d_slice_metrics(clean, gt)
+    b = compute_2d_slice_metrics(noisy, gt)
+
+    assert a["dice_2d_tumour_slices"] == pytest.approx(b["dice_2d_tumour_slices"])
+    assert b["dice_2d_all_slices"] < a["dice_2d_all_slices"]
+    assert b["false_alarm_rate_2d"] == pytest.approx(1.0)
+    assert a["false_alarm_rate_2d"] == pytest.approx(0.0)
+
+
+def test_3d_dice_is_the_slice_weighted_mean_of_2d_dice():
+    """
+    Ties the two granularities together numerically, which is what makes the gap
+    between them interpretable rather than mysterious: 3D Dice is the per-slice
+    Dice weighted by |pred| + |gt|, while the tumour-slice average is unweighted
+    and drops the slices where only a false positive appears.
+    """
+    from src.evaluation.metrics import compute_dice_3d
+
+    rng = np.random.default_rng(11)
+    gt = (rng.random((16, 16, 12)) > 0.85).astype(np.uint8)
+    pred = (rng.random((16, 16, 12)) > 0.85).astype(np.uint8)
+
+    weighted = weights = 0.0
+    for i in range(gt.shape[2]):
+        p, g = pred[:, :, i], gt[:, :, i]
+        w = float(p.sum() + g.sum())
+        if w == 0:
+            continue
+        weighted += w * (2.0 * float(np.logical_and(p, g).sum()) / w)
+        weights += w
+
+    assert weighted / weights == pytest.approx(compute_dice_3d(pred, gt), abs=1e-12)

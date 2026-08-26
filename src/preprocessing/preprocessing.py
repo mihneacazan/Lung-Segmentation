@@ -49,8 +49,11 @@ from tqdm import tqdm
 from src.config import resolve_nifti_path, OUTPUT_DIR, DATA_DIR
 from src.preprocessing.create_split import load_patient_split
 from src.geometry import (
+    RESIZE_MODES,
     TARGET_SPACING,
     get_ornt,
+    resize_plan,
+    to_network_grid,
     reorient_to_canonical,
     permute_spacing,
     resample_volume,
@@ -73,22 +76,28 @@ TARGET_SLICE_SIZE = (192, 192)
 BODY_SLICE_MIN_MEAN = 0.05
 
 
-def get_preprocessed_dir():
-    """Returns the base path for preprocessed output: output/preprocessed/"""
-    return os.path.join(OUTPUT_DIR, "preprocessed")
+def get_preprocessed_dir(name="preprocessed"):
+    """
+    Returns the base path for preprocessed output: output/{name}/
+
+    The name is a parameter so that a run using a different resize mode writes a
+    separate dataset instead of overwriting the one every existing experiment
+    was trained against.
+    """
+    return os.path.join(OUTPUT_DIR, name)
 
 
-def get_volumes_dir():
+def get_volumes_dir(name="preprocessed"):
     """Returns the path holding one .npy slice stack per patient."""
-    return os.path.join(get_preprocessed_dir(), "volumes")
+    return os.path.join(get_preprocessed_dir(name), "volumes")
 
 
-def get_metadata_dir():
-    """Returns the path for per-patient reconstruction metadata: output/metadata/"""
-    return os.path.join(OUTPUT_DIR, "metadata")
+def get_metadata_dir(name="metadata"):
+    """Returns the path for per-patient reconstruction metadata: output/{name}/"""
+    return os.path.join(OUTPUT_DIR, name)
 
 
-def clean_preprocessed_directory():
+def clean_preprocessed_directory(name="preprocessed"):
     """
     Removes output/preprocessed/ before regenerating.
 
@@ -96,7 +105,7 @@ def clean_preprocessed_directory():
     from a patient who moved between splits sitting in their old folder, and the
     model would be evaluated on data it had already trained on.
     """
-    preprocessed_dir = get_preprocessed_dir()
+    preprocessed_dir = get_preprocessed_dir(name)
     if os.path.exists(preprocessed_dir):
         print(f"[CLEAN] Removing stale preprocessed directory: {preprocessed_dir}")
         shutil.rmtree(preprocessed_dir)
@@ -184,7 +193,9 @@ def verify_case(case_id, img_nii, lbl_nii, img_data, lbl_data):
     return checks, problems
 
 
-def preprocess_case(case_id, img_path, lbl_path, run_qc=True):
+def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
+                    resize_mode="stretch", target_size=None, mm_per_px=None,
+                    mask_order=1):
     """
     Runs the full forward preprocessing pipeline for one patient.
 
@@ -194,14 +205,31 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True):
         run_qc (bool): Whether to run the reconstruction round-trip. It costs
             roughly 30 seconds per patient because it resamples the full volume
             back to original resolution, but it is what catches geometry bugs.
+        resize_mode (str): How cropped slices reach the fixed network grid, one
+            of `src.geometry.RESIZE_MODES`. The default reproduces the dataset
+            every experiment so far was trained on.
+        target_size (int): Side of that grid. Defaults to TARGET_SLICE_SIZE.
+        mm_per_px (float): Millimetres per pixel, `fixed_mm` only.
+        mask_order (int): Interpolation order for the label on the 2D resize,
+            1 for bilinear-then-threshold or 0 for nearest. The image is always
+            bilinear. Bilinear at 0.5 is an area-weighted vote — a grid pixel
+            becomes tumour when the source region it covers was mostly tumour —
+            whereas nearest copies one source pixel and discards the rest, so
+            the boundary lands wherever the sampling grid happens to fall.
+            Measured over four patients, bilinear keeps 0.015-0.02 more
+            round-trip Dice at identical positive-slice counts, which is why it
+            is the default. Nearest is kept because it is the conventional
+            choice for label resampling and the difference is worth being able
+            to demonstrate rather than assert.
 
     Returns:
         tuple: (img_stack, lbl_stack, metadata, qc)
-            img_stack (np.ndarray): float16 (192, 192, D) normalized CT slices.
-            lbl_stack (np.ndarray): uint8 (192, 192, D) binary masks.
+            img_stack (np.ndarray): float16 (S, S, D) normalized CT slices.
+            lbl_stack (np.ndarray): uint8 (S, S, D) binary masks.
             metadata (dict): everything needed to invert the pipeline.
             qc (dict): quality-control measurements for this case.
     """
+    target_size = int(target_size or TARGET_SLICE_SIZE[0])
     img_nii = nib.load(img_path)
     lbl_nii = nib.load(lbl_path)
 
@@ -241,16 +269,22 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True):
     img_norm = apply_hu_windowing(img_hu)
     del img_hu
 
-    # --- Step 5: resize every axial slice to 192x192 ---
+    # --- Step 5: map every axial slice onto the fixed network grid ---
+    # How that mapping is done is the `resize_mode` variable; see src.geometry
+    # for what each mode trades away. The plan is computed once per patient and
+    # stored in metadata, because the inverse needs it at evaluation time.
+    plan = resize_plan(cropped_shape, mode=resize_mode, target_size=target_size,
+                       mm_per_px=mm_per_px)
+    grid = (int(target_size), int(target_size))
     n_slices = cropped_shape[2]
-    img_stack = np.zeros((*TARGET_SLICE_SIZE, n_slices), dtype=np.float16)
-    lbl_stack = np.zeros((*TARGET_SLICE_SIZE, n_slices), dtype=np.uint8)
+    img_stack = np.zeros((*grid, n_slices), dtype=np.float16)
+    lbl_stack = np.zeros((*grid, n_slices), dtype=np.uint8)
 
     for s in range(n_slices):
-        img_stack[:, :, s] = resize_slice_2d(
-            img_norm[:, :, s], TARGET_SLICE_SIZE, order=1).astype(np.float16)
-        resized_lbl = resize_slice_2d(
-            lbl_crop[:, :, s].astype(np.float32), TARGET_SLICE_SIZE, order=1)
+        img_stack[:, :, s] = to_network_grid(
+            img_norm[:, :, s], plan, order=1).astype(np.float16)
+        resized_lbl = to_network_grid(
+            lbl_crop[:, :, s].astype(np.float32), plan, order=mask_order)
         lbl_stack[:, :, s] = (resized_lbl > 0.5).astype(np.uint8)
 
     # Per-slice bookkeeping used later for sampling
@@ -271,7 +305,9 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True):
         "resampled_shape": list(resampled_shape),
         "crop_bbox": crop_bbox,
         "cropped_shape": list(cropped_shape),
-        "target_slice_size": list(TARGET_SLICE_SIZE),
+        "target_slice_size": list(grid),
+        "resize_plan": plan,
+        "mask_order": int(mask_order),
         "hu_min": HU_MIN,
         "hu_max": HU_MAX,
     }
@@ -328,7 +364,10 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True):
     return img_stack, lbl_stack, metadata, qc
 
 
-def preprocess_all(run_qc=True):
+def preprocess_all(run_qc=True, resize_mode="stretch", target_size=None,
+                   mm_per_px=None, mask_order=1,
+                   preprocessed_name="preprocessed",
+                   metadata_name="metadata", qc_name="preprocessing_qc.csv"):
     """
     Runs preprocessing over every patient in the dataset, writing:
         output/preprocessed/volumes/{case_id}_img.npy   float16 (192,192,D)
@@ -341,12 +380,29 @@ def preprocess_all(run_qc=True):
         run_qc (bool): Whether to measure the reconstruction round-trip for every
             patient. Adds roughly 30-50 seconds per case (about 40 minutes for
             the full dataset) and is what verifies the geometry inverse.
+        resize_mode (str): How cropped slices reach the network grid; see
+            `src.geometry.RESIZE_MODES`.
+        target_size (int): Side of that grid. Defaults to TARGET_SLICE_SIZE.
+        mm_per_px (float): Millimetres per pixel, `fixed_mm` only.
+        mask_order (int): Label interpolation order on the 2D resize; see
+            `preprocess_case`.
+        preprocessed_name, metadata_name, qc_name (str): Output names.
+            Changing the resize mode without also changing these would
+            overwrite the dataset the existing experiments were trained on.
     """
+    target_size = int(target_size or TARGET_SLICE_SIZE[0])
+    grid = (target_size, target_size)
+
     print("=== ANATOMICALLY-CORRECT PREPROCESSING PIPELINE ===\n")
+    print(f"  Resize mode: {resize_mode} -> {target_size}x{target_size}"
+          + (f" at {mm_per_px} mm/px" if resize_mode == "fixed_mm" else ""))
+    print(f"  Mask interpolation: "
+          f"{'nearest' if mask_order == 0 else 'bilinear then threshold at 0.5'}")
+    print(f"  Writing to: output/{preprocessed_name}/ and output/{metadata_name}/")
     if not run_qc:
         print("[!] QC round-trip disabled. Geometry errors will not be detected.\n")
 
-    clean_preprocessed_directory()
+    clean_preprocessed_directory(preprocessed_name)
 
     split = load_patient_split()
     split_of = {}
@@ -354,16 +410,19 @@ def preprocess_all(run_qc=True):
         for case_id in split[mode]:
             split_of[case_id] = mode
 
-    volumes_dir = get_volumes_dir()
+    volumes_dir = get_volumes_dir(preprocessed_name)
     os.makedirs(volumes_dir, exist_ok=True)
-    os.makedirs(get_metadata_dir(), exist_ok=True)
+    os.makedirs(get_metadata_dir(metadata_name), exist_ok=True)
 
     with open(os.path.join(DATA_DIR, "dataset.json"), "r") as f:
         dataset_info = json.load(f)
     training_cases = dataset_info["training"]
 
     index = {
-        "target_slice_size": list(TARGET_SLICE_SIZE),
+        "target_slice_size": list(grid),
+        "resize_mode": resize_mode,
+        "mm_per_px": mm_per_px,
+        "mask_order": int(mask_order),
         "target_spacing": list(TARGET_SPACING),
         "hu_window": [HU_MIN, HU_MAX],
         "splits": {"train": [], "val": [], "test": []},
@@ -387,6 +446,10 @@ def preprocess_all(run_qc=True):
                 resolve_nifti_path(case["image"]),
                 resolve_nifti_path(case["label"]),
                 run_qc=run_qc,
+                resize_mode=resize_mode,
+                target_size=target_size,
+                mm_per_px=mm_per_px,
+                mask_order=mask_order,
             )
         except Exception as e:
             print(f"\n  [ERROR] {case_id} failed: {e}")
@@ -401,7 +464,7 @@ def preprocess_all(run_qc=True):
         np.save(os.path.join(volumes_dir, f"{case_id}_img.npy"), img_stack)
         np.save(os.path.join(volumes_dir, f"{case_id}_lbl.npy"), lbl_stack)
 
-        with open(os.path.join(get_metadata_dir(), f"{case_id}.json"), "w") as f:
+        with open(os.path.join(get_metadata_dir(metadata_name), f"{case_id}.json"), "w") as f:
             json.dump(metadata, f, indent=4)
 
         pos_per_slice = lbl_stack.sum(axis=(0, 1))
@@ -419,10 +482,10 @@ def preprocess_all(run_qc=True):
         }
         qc_records.append(qc)
 
-    with open(os.path.join(get_preprocessed_dir(), "index.json"), "w") as f:
+    with open(os.path.join(get_preprocessed_dir(preprocessed_name), "index.json"), "w") as f:
         json.dump(index, f, indent=2)
 
-    qc_path = os.path.join(OUTPUT_DIR, "preprocessing_qc.csv")
+    qc_path = os.path.join(OUTPUT_DIR, qc_name)
     if qc_records:
         with open(qc_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(qc_records[0].keys()))
@@ -484,6 +547,43 @@ if __name__ == "__main__":
     parser.add_argument("--skip_qc", action="store_true",
                         help="Skip the reconstruction round-trip check (much "
                              "faster, but geometry errors go undetected)")
+    parser.add_argument("--resize_mode", type=str, default="stretch",
+                        choices=RESIZE_MODES,
+                        help="How a cropped slice reaches the fixed network "
+                             "grid. 'stretch' fills the grid and distorts "
+                             "proportions; 'pad' squares the crop first and "
+                             "keeps them; 'fixed_mm' additionally gives every "
+                             "patient the same millimetres per pixel.")
+    parser.add_argument("--target_size", type=int, default=None,
+                        help="Side of the network grid. Default 192.")
+    parser.add_argument("--mm_per_px", type=float, default=None,
+                        help="Millimetres per pixel, --resize_mode fixed_mm "
+                             "only. The grid must be large enough for the "
+                             "biggest body: 490 mm here, so 256 px needs at "
+                             "least 1.92.")
+    parser.add_argument("--mask_order", type=int, default=1, choices=(0, 1),
+                        help="Label interpolation on the 2D resize: 1 is "
+                             "bilinear then a 0.5 threshold (the default, and "
+                             "what every existing experiment used), 0 is "
+                             "nearest neighbour. The image is bilinear either "
+                             "way. Note the 3D resample already uses nearest "
+                             "for the label regardless, because interpolating "
+                             "along Z would invent tissue between slices.")
+    parser.add_argument("--out_name", type=str, default=None,
+                        help="Writes to output/{out_name}/ and "
+                             "output/{out_name}_metadata/ instead of the "
+                             "default pair, so a variant dataset never "
+                             "overwrites the one already trained against.")
     args = parser.parse_args()
 
-    preprocess_all(run_qc=not args.skip_qc)
+    if args.out_name:
+        preprocess_all(run_qc=not args.skip_qc, resize_mode=args.resize_mode,
+                       target_size=args.target_size, mm_per_px=args.mm_per_px,
+                       mask_order=args.mask_order,
+                       preprocessed_name=args.out_name,
+                       metadata_name=f"{args.out_name}_metadata",
+                       qc_name=f"{args.out_name}_qc.csv")
+    else:
+        preprocess_all(run_qc=not args.skip_qc, resize_mode=args.resize_mode,
+                       target_size=args.target_size, mm_per_px=args.mm_per_px,
+                       mask_order=args.mask_order)

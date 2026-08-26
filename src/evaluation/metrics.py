@@ -374,6 +374,194 @@ def compute_all_3d_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
 
 
 # ============================================================================
+#  PER-SLICE AND PER-LESION METRICS
+# ============================================================================
+#
+# These exist to make this project's numbers comparable with work that reports
+# segmentation quality at a different granularity, which most of the nodule
+# literature does. The three views answer different questions and are not
+# interchangeable:
+#
+#   per-patient   One Dice over the whole reconstructed volume. Every false
+#                 positive anywhere in the scan counts against the score. This is
+#                 what `compute_all_3d_metrics` reports and what this project
+#                 quotes.
+#   per-slice     Dice within a single axial slice, averaged over slices. Taken
+#                 over tumour-bearing slices only, false positives on the other
+#                 ~91% of slices never enter any average, so the number can be
+#                 far higher than the per-patient one for the same prediction.
+#   per-lesion    Dice for each ground-truth connected component against the part
+#                 of the prediction over it. False positives distant from every
+#                 lesion are attributed to none of them, so this also reads
+#                 higher than per-patient.
+#
+# The gap is not a detail. On a published LIDC-IDRI run the same 2.5D U-Net
+# scores 0.6154 per tumour-slice and 0.2225 per patient.
+
+def compute_2d_slice_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
+                             failure_threshold: float = 0.10) -> Dict[str, float]:
+    """
+    Scores a reconstructed volume slice by slice, aggregated two ways.
+
+    Both aggregations are returned because each is incomplete alone. The
+    tumour-slice average measures delineation given that something is there; the
+    all-slice average additionally charges for predictions on empty anatomy. A
+    model can look strong on the first and weak on the second, and the pair says
+    so.
+
+    Two conventions in here decide what the numbers mean, so both are explicit:
+
+    Dice and IoU score a slice with no tumour and no prediction as 1.0. That is
+    the usual convention and it is why `dice_2d_all_slices` reads so high: about
+    91% of slices in this dataset are empty, so most of that average is the
+    model being correctly silent. It is comparable with other work that reports
+    per-slice Dice over whole volumes, and it is not comparable with per-patient
+    Dice. Never quote it beside the 3D number without saying which is which.
+
+    Precision and sensitivity are left undefined rather than assumed. Precision
+    on a slice where nothing was predicted is vacuous, and scoring it 1.0 pays a
+    model for its silence: with a third of tumour slices receiving no prediction
+    at all, that alone moved measured precision by more than 0.08 here. Those
+    slices are excluded from the precision average, and the count that did
+    contribute is returned so the exclusion stays visible. Sensitivity is
+    handled the same way on slices with no ground truth.
+
+    Args:
+        pred_mask, gt_mask: Binary volumes of the same shape, (H, W, D), slice
+            axis last.
+        failure_threshold: A tumour-bearing slice scoring below this counts as a
+            failure.
+
+    Returns:
+        dict: dice/iou/sensitivity/precision over tumour slices and over all
+              slices, the slice counts including how many carried a prediction,
+              the tumour-slice failure rate, and the false-alarm rate, meaning
+              the fraction of empty slices on which the model predicted anything.
+    """
+    pred = np.asarray(pred_mask) > 0.5
+    gt = np.asarray(gt_mask) > 0.5
+
+    tumour, everything = [], []
+    n_false_alarm = n_empty = n_tumour_predicted = 0
+
+    for index in range(gt.shape[2]):
+        p, g = pred[:, :, index], gt[:, :, index]
+        tp = int(np.logical_and(p, g).sum())
+        p_sum, g_sum = int(p.sum()), int(g.sum())
+
+        if p_sum == 0 and g_sum == 0:
+            scores = {"dice": 1.0, "iou": 1.0}
+        elif p_sum == 0 or g_sum == 0:
+            scores = {"dice": 0.0, "iou": 0.0}
+        else:
+            scores = {"dice": 2.0 * tp / (p_sum + g_sum),
+                      "iou": tp / (p_sum + g_sum - tp)}
+
+        # NaN, not a default: nothing was predicted, so there is no precision to
+        # measure, and no ground truth means there is no sensitivity to measure.
+        scores["precision"] = (tp / p_sum) if p_sum else float("nan")
+        scores["sensitivity"] = (tp / g_sum) if g_sum else float("nan")
+
+        everything.append(scores)
+        if g_sum > 0:
+            tumour.append(scores)
+            n_tumour_predicted += int(p_sum > 0)
+        else:
+            n_empty += 1
+            n_false_alarm += int(p_sum > 0)
+
+    def mean_of(rows, key):
+        values = [r[key] for r in rows if not np.isnan(r[key])]
+        return float(np.mean(values)) if values else float("nan")
+
+    return {
+        "n_tumour_slices_with_prediction": n_tumour_predicted,
+        "dice_2d_tumour_slices": mean_of(tumour, "dice"),
+        "iou_2d_tumour_slices": mean_of(tumour, "iou"),
+        "sensitivity_2d_tumour_slices": mean_of(tumour, "sensitivity"),
+        "precision_2d_tumour_slices": mean_of(tumour, "precision"),
+        "dice_2d_all_slices": mean_of(everything, "dice"),
+        "iou_2d_all_slices": mean_of(everything, "iou"),
+        "sensitivity_2d_all_slices": mean_of(everything, "sensitivity"),
+        "precision_2d_all_slices": mean_of(everything, "precision"),
+        "n_tumour_slices": len(tumour),
+        "n_slices": len(everything),
+        "failure_rate_2d": (float(np.mean([r["dice"] < failure_threshold
+                                           for r in tumour])) if tumour
+                            else float("nan")),
+        "false_alarm_rate_2d": (n_false_alarm / n_empty) if n_empty else 0.0,
+    }
+
+
+def compute_lesion_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
+                           min_lesion_voxels: int = 0,
+                           failure_threshold: float = 0.10) -> List[Dict]:
+    """
+    Scores each ground-truth lesion separately against the prediction over it.
+
+    A lesion's prediction is every predicted voxel inside that lesion's own
+    bounding box: the box is the attribution rule. A false positive elsewhere in
+    the scan therefore belongs to no lesion and is invisible here, which is why
+    this view reads higher than per-patient Dice and why the two must never be
+    quoted as though they were the same quantity.
+
+    `min_lesion_voxels` matters on this dataset specifically. The Decathlon lung
+    task annotates one primary tumour per patient, and the extra connected
+    components are annotation dust: across the ten test patients the largest
+    component holds 99.4% to 100% of the tumour volume, with up to thirteen
+    fragments of a few voxels each making up the rest. Averaged in unfiltered,
+    those fragments score zero and drag the mean below the per-patient figure,
+    inverting the relationship this metric has in the nodule literature.
+    Filtering them out leaves one lesion per patient, at which point per-lesion
+    Dice is per-patient Dice.
+
+    Args:
+        pred_mask, gt_mask: Binary volumes of the same shape.
+        min_lesion_voxels: Ground-truth components smaller than this are ignored.
+        failure_threshold: A lesion scoring below this counts as missed.
+
+    Returns:
+        list of dict: one row per lesion, carrying its voxel count, Dice, IoU,
+        sensitivity, precision, and whether it was missed.
+    """
+    pred = np.asarray(pred_mask) > 0.5
+    gt = np.asarray(gt_mask) > 0.5
+
+    labelled, n_components = scipy_label(gt)
+    lesions = []
+
+    for component in range(1, n_components + 1):
+        lesion = labelled == component
+        n_voxels = int(lesion.sum())
+        if n_voxels < min_lesion_voxels:
+            continue
+
+        coords = np.argwhere(lesion)
+        lower = coords.min(axis=0)
+        upper = coords.max(axis=0) + 1
+        box = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper))
+
+        lesion_gt = lesion[box]
+        lesion_pred = pred[box]
+
+        tp = int(np.logical_and(lesion_pred, lesion_gt).sum())
+        p_sum, g_sum = int(lesion_pred.sum()), int(lesion_gt.sum())
+        dice = 2.0 * tp / (p_sum + g_sum) if (p_sum + g_sum) else 1.0
+        union = p_sum + g_sum - tp
+
+        lesions.append({
+            "lesion_voxels": n_voxels,
+            "dice": dice,
+            "iou": tp / union if union else 1.0,
+            "sensitivity": tp / g_sum if g_sum else 1.0,
+            "precision": tp / p_sum if p_sum else 0.0,
+            "is_missed": bool(dice < failure_threshold),
+        })
+
+    return lesions
+
+
+# ============================================================================
 #  3D VOLUME RECONSTRUCTION
 # ============================================================================
 
@@ -586,11 +774,23 @@ def compute_macro_micro_averages(patient_metrics: Dict[str, Dict],
     """
     # Macro-average: simple mean of per-patient scores
     metric_keys = ["dice_3d", "iou_3d", "sensitivity_3d", "precision_3d",
-                   "specificity_3d", "hd95_3d", "asd_3d"]
-    
+                   "specificity_3d", "hd95_3d", "asd_3d",
+                   # Per-slice views of the same predictions, carried alongside
+                   # so a run reports every granularity it was scored at. The
+                   # micro block stays 3D only: pooling voxels across patients
+                   # has no per-slice counterpart.
+                   "dice_2d_tumour_slices", "iou_2d_tumour_slices",
+                   "sensitivity_2d_tumour_slices", "precision_2d_tumour_slices",
+                   "dice_2d_all_slices", "iou_2d_all_slices",
+                   "sensitivity_2d_all_slices", "precision_2d_all_slices",
+                   "failure_rate_2d", "false_alarm_rate_2d"]
+
     macro = {}
     for key in metric_keys:
-        values = [m[key] for m in patient_metrics.values() if key in m]
+        # A patient can contribute NaN for the precision views when nothing was
+        # predicted anywhere; averaging that in would poison the whole column.
+        values = [m[key] for m in patient_metrics.values()
+                  if key in m and not np.isnan(m[key])]
         macro[key] = float(np.mean(values)) if values else 0.0
     
     # Micro-average: pool all voxels across all patients
