@@ -36,6 +36,9 @@ Usage:
 """
 
 import csv
+import json
+import os
+
 import numpy as np
 import torch
 from scipy.ndimage import distance_transform_edt, label as scipy_label
@@ -337,7 +340,14 @@ def compute_all_3d_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
 
     Returns dict with:
         dice_3d, iou_3d, sensitivity_3d, precision_3d, specificity_3d,
-        hd95_3d, asd_3d, fp_components, is_failure
+        volume_ratio_3d, hd95_3d, asd_3d, fp_components, is_failure
+
+    `volume_ratio_3d` is predicted volume over true volume: below 1 the model
+    under-segments, above 1 it over-paints. It is redundant with the pair above
+    it - sensitivity and precision both carry TP on top, one over the true volume
+    and one over the predicted one, so their quotient is this ratio - but a
+    number nobody has to derive is a number that gets read. NaN when the ground
+    truth is empty, since there is no volume to be a ratio of.
 
     With `surface_metrics=False`, hd95_3d and asd_3d come back as NaN and the two
     distance transforms behind them are skipped. Those transforms run over the
@@ -359,13 +369,18 @@ def compute_all_3d_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
         hd95 = asd = float("nan")
     fp_comps = count_false_positive_components(pred_mask, gt_mask)
     is_failure = bool(dice < 0.10 and (gt_mask > 0.5).sum() > 0)
-    
+
+    gt_voxels = float((gt_mask > 0.5).sum())
+    pred_voxels = float((pred_mask > 0.5).sum())
+    volume_ratio = pred_voxels / gt_voxels if gt_voxels else float("nan")
+
     return {
         "dice_3d": dice,
         "iou_3d": iou,
         "sensitivity_3d": sens,
         "precision_3d": prec,
         "specificity_3d": spec,
+        "volume_ratio_3d": volume_ratio,
         "hd95_3d": hd95,
         "asd_3d": asd,
         "fp_components": fp_comps,
@@ -566,29 +581,61 @@ def compute_lesion_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray,
 # ============================================================================
 
 def stack_slice_predictions(slice_predictions: Dict[int, np.ndarray],
-                            n_slices: int) -> np.ndarray:
+                            n_slices: int,
+                            require_full_coverage: bool = True) -> np.ndarray:
     """
     Assembles a {slice_index: 2D array} mapping into a dense 3D stack.
+
+    A missing slice becomes an all-zero prediction, and that is not a neutral
+    default. It is a confident claim that the slice holds no tumour, made without
+    running the model. Evaluated on a set restricted to tumour-bearing slices,
+    the 91.7% of this dataset's test slices that are negative would all be filled
+    in that way: the false positives the model would have produced there simply
+    never appear, and on the per-slice views an empty prediction against an empty
+    label scores a free 1.0. The same checkpoint measured both ways came out at
+    Dice 0.4645 and 0.0540.
+
+    So the fill is refused by default. `require_full_coverage=False` is the
+    deliberate opt-out for an oracle-positive-slices evaluation, which is a real
+    thing to measure but is not volume performance and must not be reported as
+    though it were.
 
     Args:
         slice_predictions: Mapping of slice index to a 2D (192, 192) array.
         n_slices: Depth of the output stack, from metadata["cropped_shape"][2].
+        require_full_coverage: Raise unless every slice in range has a
+            prediction. Pass False only for an evaluation that is reported as
+            restricted.
 
     Returns:
-        np.ndarray: float32 stack of shape (192, 192, n_slices). Slices with no
-                    prediction stay zero.
+        np.ndarray: float32 stack of shape (192, 192, n_slices).
+
+    Raises:
+        ValueError: If slices are missing and full coverage was required.
     """
     any_slice = next(iter(slice_predictions.values()))
     stack = np.zeros((*any_slice.shape, n_slices), dtype=np.float32)
+    in_range = 0
     for slice_idx, slice_2d in slice_predictions.items():
         if 0 <= slice_idx < n_slices:
             stack[:, :, slice_idx] = slice_2d
+            in_range += 1
+
+    if require_full_coverage and in_range < n_slices:
+        missing = n_slices - in_range
+        raise ValueError(
+            f"{missing} of {n_slices} slices have no prediction and would be "
+            f"filled with zeros, which scores them as confidently empty without "
+            f"the model having seen them. Either predict every slice, or pass "
+            f"require_full_coverage=False and report the result as an oracle "
+            f"positive-slices evaluation rather than as volume performance.")
     return stack
 
 
 def reconstruct_patient_3d_volume(slice_predictions, metadata: Dict,
                                   threshold: float = 0.5,
-                                  binarize: bool = True) -> np.ndarray:
+                                  binarize: bool = True,
+                                  require_full_coverage: bool = True) -> np.ndarray:
     """
     Reconstructs a 3D prediction in the patient's ORIGINAL NIfTI geometry.
 
@@ -604,6 +651,9 @@ def reconstruct_patient_3d_volume(slice_predictions, metadata: Dict,
         metadata: Per-patient metadata written by the preprocessing stage.
         threshold: Binarization threshold, applied after all interpolation.
         binarize: If False, returns float probabilities instead of a binary mask.
+        require_full_coverage: Refuse to zero-fill slices the model was never run
+            on. See `stack_slice_predictions`; pass False only for an evaluation
+            reported as restricted to oracle positive slices.
 
     Returns:
         np.ndarray: Volume of shape metadata["original_shape"].
@@ -611,7 +661,9 @@ def reconstruct_patient_3d_volume(slice_predictions, metadata: Dict,
     n_slices = int(metadata["cropped_shape"][2])
 
     if isinstance(slice_predictions, dict):
-        slice_stack = stack_slice_predictions(slice_predictions, n_slices)
+        slice_stack = stack_slice_predictions(
+            slice_predictions, n_slices,
+            require_full_coverage=require_full_coverage)
     else:
         slice_stack = np.asarray(slice_predictions, dtype=np.float32)
 
@@ -642,10 +694,25 @@ def threshold_sweep(patient_probs: Dict[str, Dict[int, np.ndarray]],
     Finds the binarization threshold that maximizes mean per-patient 3D Dice on
     the validation set.
 
-    The sweep runs in preprocessed 192x192 space rather than reconstructing each
-    volume into original geometry per candidate threshold, which is roughly two
-    orders of magnitude faster and picks the same optimum, since reconstruction
-    is a fixed monotone resampling shared by every candidate.
+    The sweep runs in preprocessed 192x192 space, which is not the space the
+    result is reported in. An earlier version of this docstring claimed the two
+    pick the same optimum "since reconstruction is a fixed monotone resampling
+    shared by every candidate". That is wrong, and measurably so.
+
+    Reconstruction is monotone in a single voxel's value but is not a bijection:
+    it upsamples roughly 2.6x in plane by linear interpolation and only then
+    thresholds. A boundary between a 0.9 voxel and a 0.1 voxel becomes a smooth
+    ramp, and that ramp contributes almost no area at threshold 0.75 but a great
+    deal at 0.40. The reconstructed mask therefore grows faster as the threshold
+    falls than the 192x192 mask does, and the optimum moves down. Measured on
+    this project's validation split, it moves down by exactly one grid step for
+    both a single model (0.75 -> 0.65) and a three-seed ensemble (0.65 -> 0.55),
+    worth +0.013 and +0.017 test Dice respectively.
+
+    Prefer `threshold_sweep_original_geometry`, which optimises the quantity
+    actually reported. This function is kept because it is two orders of
+    magnitude cheaper and is the right tool when the comparison itself lives in
+    network space, such as the per-epoch validation signal.
 
     This must only ever be called on validation data. Choosing a threshold on
     test would leak the test set into model selection.
@@ -716,6 +783,127 @@ def threshold_sweep(patient_probs: Dict[str, Dict[int, np.ndarray]],
     return best_threshold, results
 
 
+def threshold_sweep_original_geometry(patient_probs: Dict[str, Dict[int, np.ndarray]],
+                                      metadata_dir: str,
+                                      thresholds: Optional[List[float]] = None,
+                                      verbose: bool = True,
+                                      require_full_coverage: bool = True) -> Tuple[float, Dict]:
+    """
+    Finds the binarization threshold maximizing mean per-patient 3D Dice in the
+    patient's ORIGINAL NIfTI geometry, against the untouched source label.
+
+    This optimises the same quantity `evaluate_full` reports, which
+    `threshold_sweep` does not — see that function's docstring for the
+    measured discrepancy and why it exists.
+
+    The obvious implementation, reconstructing once per candidate threshold, costs
+    about 6.4 seconds per patient per threshold and is unusable. Two observations
+    make it cheap instead:
+
+    Reconstruction is threshold-independent when asked for probabilities, so it
+    runs once per patient rather than once per candidate.
+
+    Almost none of the volume can ever matter. Only voxels above the lowest
+    candidate threshold, or inside the ground truth, can affect any score; on this
+    dataset that is 0.04% of an 86-million-voxel volume. Extracting them once and
+    sweeping over the compact vector gives bit-identical results roughly 12 times
+    faster, and drops the full sweep from 40 seconds per patient to 3.3.
+
+    That second shortcut is only valid because every candidate is at or above
+    `min(thresholds)`, which holds by construction. Do not lower a threshold
+    afterwards against the returned vector.
+
+    Args:
+        patient_probs: {case_id: {slice_index: 2D probability array}}, or a dense
+            (H, W, D) array per case — whatever `reconstruct_patient_3d_volume`
+            accepts.
+        metadata_dir (str): Directory of per-patient reconstruction metadata.
+        thresholds: Candidate thresholds. Defaults to 0.10 ... 0.99.
+        verbose: Whether to print each candidate's score.
+        require_full_coverage: Refuse to zero-fill slices the model was not run
+            on. False is for a sweep on an oracle positive-slices protocol, where
+            the threshold chosen is the best for that protocol and no other.
+
+    Returns:
+        tuple: (best_threshold, {threshold: mean_dice})
+    """
+    import nibabel as nib
+
+    from src.config import resolve_nifti_path
+
+    if thresholds is None:
+        thresholds = DEFAULT_SWEEP_THRESHOLDS
+    floor = min(thresholds)
+
+    if verbose:
+        print(f"  Testing {len(thresholds)} thresholds from {min(thresholds):.2f} "
+              f"to {max(thresholds):.2f}, in original geometry...")
+
+    per_patient: Dict[str, Dict[float, float]] = {}
+
+    for case_id, slice_dict in sorted(patient_probs.items()):
+        meta_path = os.path.join(metadata_dir, f"{case_id}.json")
+        if not os.path.exists(meta_path):
+            print(f"  [WARNING] No metadata for {case_id}, skipping.")
+            continue
+
+        with open(meta_path, "r") as f:
+            metadata = json.load(f)
+
+        probs_3d = reconstruct_patient_3d_volume(
+            slice_dict, metadata, binarize=False,
+            require_full_coverage=require_full_coverage)
+        gt_path = resolve_nifti_path(f"./labelsTr/{case_id}.nii.gz")
+        gt_3d = np.asanyarray(nib.load(gt_path).dataobj) > 0.5
+
+        # Every voxel that could ever cross a candidate threshold, plus every
+        # voxel of ground truth. Restricting to their union leaves the counts
+        # below exact rather than approximate: no candidate mask reaches outside
+        # it, and the whole ground truth is inside it.
+        relevant = (probs_3d > floor) | gt_3d
+        flat = np.flatnonzero(relevant.ravel())
+        p_vec = probs_3d.ravel()[flat]
+        g_vec = gt_3d.ravel()[flat]
+        del probs_3d, relevant, flat
+
+        gt_total = int(g_vec.sum())
+        scores = {}
+        for thresh in thresholds:
+            p_bin = p_vec > thresh
+            pred_total = int(p_bin.sum())
+            if pred_total == 0 and gt_total == 0:
+                scores[thresh] = 1.0
+            elif pred_total == 0 or gt_total == 0:
+                scores[thresh] = 0.0
+            else:
+                intersection = int(np.logical_and(p_bin, g_vec).sum())
+                scores[thresh] = float(2.0 * intersection /
+                                       (pred_total + gt_total))
+        per_patient[case_id] = scores
+        del p_vec, g_vec
+
+    if not per_patient:
+        raise ValueError(
+            "No patient could be swept: none of the given cases had metadata in "
+            f"{metadata_dir}. Without it a prediction cannot be returned to the "
+            f"geometry its ground truth lives in.")
+
+    results = {t: float(np.mean([s[t] for s in per_patient.values()]))
+               for t in thresholds}
+    if verbose:
+        for thresh in thresholds:
+            print(f"    [Threshold {thresh:.2f}] Mean Val Dice = "
+                  f"{results[thresh]:.4f}", flush=True)
+
+    best_threshold = max(results, key=results.get)
+    if verbose:
+        print(f"\n  => Optimal Threshold: {best_threshold:.2f} "
+              f"(Val Dice = {results[best_threshold]:.4f}, original geometry)",
+              flush=True)
+
+    return best_threshold, results
+
+
 # ============================================================================
 #  CSV EXPORT & REPORTING
 # ============================================================================
@@ -774,7 +962,7 @@ def compute_macro_micro_averages(patient_metrics: Dict[str, Dict],
     """
     # Macro-average: simple mean of per-patient scores
     metric_keys = ["dice_3d", "iou_3d", "sensitivity_3d", "precision_3d",
-                   "specificity_3d", "hd95_3d", "asd_3d",
+                   "specificity_3d", "volume_ratio_3d", "hd95_3d", "asd_3d",
                    # Per-slice views of the same predictions, carried alongside
                    # so a run reports every granularity it was scored at. The
                    # micro block stays 3D only: pooling voxels across patients

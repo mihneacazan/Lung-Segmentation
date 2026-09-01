@@ -1,0 +1,166 @@
+{
+  "run": "prot_positives_sel_positives/seed_42",
+  "split": "test",
+  "grid": [
+    0.1,
+    0.25,
+    0.4,
+    0.5,
+    0.6,
+    0.75,
+    0.9
+  ],
+  "results": {
+    "all": {
+      "0.1": {
+        "dice_2d_tumour_slices": 0.4490363942639341,
+        "dice_2d_all_slices": 0.4673254277334662,
+        "dice_3d": 0.17056907337793503,
+        "sensitivity_3d": 0.6712238196029607,
+        "precision_3d": 0.11320262571798781,
+        "volume_ratio_3d": 15.239662709971464,
+        "fp_components": 43.3,
+        "false_alarm_rate_2d": 0.5308784154637995
+      },
+      "0.25": {
+        "dice_2d_tumour_slices": 0.45231291983336447,
+        "dice_2d_all_slices": 0.49801607090245464,
+        "dice_3d": 0.1838746778417199,
+        "sensitivity_3d": 0.6304144478489576,
+        "precision_3d": 0.12575796543411563,
+        "volume_ratio_3d": 12.368216790649148,
+        "fp_components": 41.5,
+        "false_alarm_rate_2d": 0.49758149896369763
+      },
+      "0.4": {
+        "dice_2d_tumour_slices": 0.4456745149553184,
+        "dice_2d_all_slices": 0.5285350801818914,
+        "dice_3d": 0.19317457451150147,
+        "sensitivity_3d": 0.59383580453664,
+        "precision_3d": 0.13553783231260524,
+        "volume_ratio_3d": 10.605179252372949,
+        "fp_components": 39.2,
+        "false_alarm_rate_2d": 0.4638385339765702
+      },
+      "0.5": {
+        "dice_2d_tumour_slices": 0.44193172448517687,
+        "dice_2d_all_slices": 0.5430815772657968,
+        "dice_3d": 0.19794806854930963,
+        "sensitivity_3d": 0.5706429961191661,
+        "precision_3d": 0.1412822615281936,
+        "volume_ratio_3d": 9.641150966453958,
+        "fp_components": 37.4,
+        "false_alarm_rate_2d": 0.4476126479808384
+      },
+      "0.6": {
+        "dice_2d_tumour_slices": 0.4368565066016636,
+        "dice_2d_all_slices": 0.5605789713862597,
+        "dice_3d": 0.20266763833179152,
+        "sensitivity_3d": 0.5456186759192435,
+        "precision_3d": 0.14748843581460325,
+        "volume_ratio_3d": 8.736744469733107,
+        "fp_components": 36.7,
+        "false_alarm_rate_2d": 0.4280699968995272
+      },
+      "0.75": {
+        "dice_2d_tumour_slices": 0.4205812494986402,
+        "dice_2d_all_slices": 0.5962593950054854,
+        "dice_3d": 0.207420942713093,
+        "sensitivity_3d": 0.49951797402053755,
+        "precision_3d": 0.1565583212970188,
+        "volume_ratio_3d": 7.396418998929393,
+        "fp_components": 33.0,
+        "false_alarm_rate_2d": 0.3878042991242078
+      },
+      "0.9": {
+        "dice_2d_tumour_slices": 0.38703172664194974,
+        "dice_2d_all_slices": 0.6389239004635294,
+        "dice_3d": 0.21014423474977692,
+        "sensitivity_3d": 0.4348162992578926,
+        "precision_3d": 0.16864811743494582,
+        "volume_ratio_3d": 5.922994379166635,
+        "fp_components": 29.0,
+        "false_alarm_rate_2d": 0.3384401666556852
+      }
+    },
+    "all_n_slices": 3272,
+    "positives": {
+      "0.1": {
+        "dice_2d_tumour_slices": 0.44905953964782486,
+        "dice_2d_all_slices": 0.9566798218923227,
+        "dice_3d": 0.5627894132753759,
+        "sensitivity_3d": 0.6712152462147578,
+        "precision_3d": 0.5483076207958326,
+        "volume_ratio_3d": 1.4991413126604072,
+        "fp_components": 2.2,
+        "false_alarm_rate_2d": 0.0012268637908613334
+      },
+      "0.25": {
+        "dice_2d_tumour_slices": 0.4523069783004733,
+        "dice_2d_all_slices": 0.9570644836853941,
+        "dice_3d": 0.5710818429554018,
+        "sensitivity_3d": 0.6303372873551305,
+        "precision_3d": 0.5971648087185104,
+        "volume_ratio_3d": 1.2484006786114485,
+        "fp_components": 1.8,
+        "false_alarm_rate_2d": 0.0007939633579609005
+      },
+      "0.4": {
+        "dice_2d_tumour_slices": 0.44450491491938954,
+        "dice_2d_all_slices": 0.9570228419922913,
+        "dice_3d": 0.5685571176942081,
+        "sensitivity_3d": 0.5930213326573531,
+        "precision_3d": 0.630138237546388,
+        "volume_ratio_3d": 1.0846526360444915,
+        "fp_components": 1.9,
+        "false_alarm_rate_2d": 0.0
+      },
+      "0.5": {
+        "dice_2d_tumour_slices": 0.44081462124942955,
+        "dice_2d_all_slices": 0.9565673178651354,
+        "dice_3d": 0.5638868241005462,
+        "sensitivity_3d": 0.5698971113455036,
+        "precision_3d": 0.6470428733681203,
+        "volume_ratio_3d": 0.9997428051615638,
+        "fp_components": 1.7,
+        "false_alarm_rate_2d": 0.0
+      },
+      "0.6": {
+        "dice_2d_tumour_slices": 0.43583619921729433,
+        "dice_2d_all_slices": 0.955981379587348,
+        "dice_3d": 0.5569682010780737,
+        "sensitivity_3d": 0.5449756718040171,
+        "precision_3d": 0.6657410451388648,
+        "volume_ratio_3d": 0.9169032381283329,
+        "fp_components": 2.0,
+        "false_alarm_rate_2d": 0.0
+      },
+      "0.75": {
+        "dice_2d_tumour_slices": 0.4196826936129378,
+        "dice_2d_all_slices": 0.954412364458922,
+        "dice_3d": 0.537021947166894,
+        "sensitivity_3d": 0.4989778505637473,
+        "precision_3d": 0.6900822743731552,
+        "volume_ratio_3d": 0.789713123663924,
+        "fp_components": 1.3,
+        "false_alarm_rate_2d": 0.0
+      },
+      "0.9": {
+        "dice_2d_tumour_slices": 0.3863131424953995,
+        "dice_2d_all_slices": 0.9513900437025915,
+        "dice_3d": 0.49853034289243875,
+        "sensitivity_3d": 0.4344133500123507,
+        "precision_3d": 0.7184934863402781,
+        "volume_ratio_3d": 0.634286124661139,
+        "fp_components": 1.0,
+        "false_alarm_rate_2d": 0.0
+      }
+    },
+    "positives_n_slices": 273
+  },
+  "max_2d_disagreement": 0.0011696000359288639,
+  "best_threshold": {
+    "all": 0.9,
+    "positives": 0.25
+  }
+}

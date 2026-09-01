@@ -53,6 +53,7 @@ from src.evaluation.metrics import (
     compute_macro_micro_averages,
     stratified_report,
     threshold_sweep,
+    threshold_sweep_original_geometry,
 )
 # Evaluation lives in the evaluation package so that training and the standalone
 # evaluation script provably run the same code.
@@ -65,7 +66,7 @@ from src.evaluation.evaluate import (
 # ============================================================================
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler=None,
-                    max_grad_norm=1.0):
+                    max_grad_norm=1.0, scheduler=None, scheduler_t_max=None):
     """
     Runs one training epoch, optionally under mixed precision.
 
@@ -112,27 +113,56 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler=None
             # essentially all of the FLOPs here, so evaluating the loss in fp32
             # costs almost nothing while removing that cliff.
             loss = criterion(outputs.float(), labels)
-            scaler.scale(loss).backward()
-            if max_grad_norm:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
         else:
             outputs = model(images)
             loss = criterion(outputs, labels)
-            loss.backward()
-            if max_grad_norm:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.step()
 
-        loss_value = float(loss.item())
+        # Checked before backward, not after the step. The earlier version scored
+        # the loss only once the weights had already moved, which left the
+        # non-AMP path free to take a step from a non-finite loss and then count
+        # it as skipped. Under AMP `scaler.step` would have declined the step
+        # anyway, so this changes nothing there; on CPU it is the difference
+        # between poisoning the weights and not.
+        loss_value = float(loss.detach())
         if not np.isfinite(loss_value):
             n_nonfinite += 1
             continue
 
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if max_grad_norm:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            # GradScaler inspects the unscaled gradients and skips the step when
+            # any is non-finite, which is the real guard: a finite loss can still
+            # backpropagate into non-finite gradients, so the loss check above is
+            # necessary but not sufficient.
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if max_grad_norm:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                           max_grad_norm)
+                # Without a GradScaler nothing else inspects the gradients, so
+                # the equivalent check is made here. clip_grad_norm_ returns the
+                # pre-clip total norm, which is non-finite exactly when some
+                # gradient is.
+                if not torch.isfinite(grad_norm):
+                    n_nonfinite += 1
+                    continue
+            optimizer.step()
+
         total_loss += loss_value * images.size(0)
         n_samples += images.size(0)
+        # Per-optimizer-step annealing. Passed only when the caller runs a
+        # step-unit schedule; otherwise the caller steps once per epoch and this
+        # stays None. `scheduler_t_max` holds the schedule at its floor rather
+        # than letting CosineAnnealingLR wrap back up towards the peak, the same
+        # guard the per-epoch path applies.
+        if scheduler is not None:
+            if scheduler_t_max is None or scheduler.last_epoch < scheduler_t_max:
+                scheduler.step()
 
     return total_loss / max(n_samples, 1), n_nonfinite, n_batches
 
@@ -152,28 +182,66 @@ class EarlyStopping:
     patience counter started at epoch one fires long before the model has had a
     chance.
 
+    An epoch is not a comparable unit across sampling modes: at batch 16 `all`
+    runs ~898 optimizer steps per epoch and `balanced` at 1:1 runs ~177, so a
+    fixed epoch patience gives one run five times the step-wise grace of the
+    other. Pass `patience_steps` and `min_steps` to count in optimizer steps
+    instead, which is the unit the two runs actually share. The epoch fields stay
+    the default so every committed run reproduces unchanged.
+
     Args:
         patience (int): Epochs without improvement before stopping.
         min_delta (float): Improvement below this counts as no improvement.
         min_epochs (int): Earliest epoch at which stopping may trigger.
+        patience_steps (int|None): Optimizer steps without improvement before
+            stopping. Overrides `patience` when set. Zero disables early
+            stopping entirely, which is what a step-budget experiment wants:
+            stopping at a different point in each run means the runs did not in
+            fact receive the same number of updates.
+        min_steps (int|None): Earliest step count at which stopping may trigger.
+            Overrides `min_epochs` when set.
     """
 
     def __init__(self, patience: int = 10, min_delta: float = 1e-4,
-                 min_epochs: int = 15):
+                 min_epochs: int = 15, patience_steps: int = None,
+                 min_steps: int = None):
         self.patience = patience
         self.min_delta = min_delta
         self.min_epochs = min_epochs
+        self.patience_steps = patience_steps
+        self.min_steps = min_steps
         self.best_score = -np.inf
         self.counter = 0
+        self.best_steps = 0
         self.should_stop = False
 
-    def step(self, score: float, epoch: int) -> bool:
+    @property
+    def unit(self) -> str:
+        return "steps" if self.patience_steps else "epochs"
+
+    def step(self, score: float, epoch: int, steps_taken: int = 0) -> bool:
+        # Disabled. An experiment that controls the optimizer-step count cannot
+        # also stop at a different point in each run: the first attempt at this
+        # baseline spent 53%, 65% and 76% of the same budget, kept checkpoints at
+        # learning rates of 7.6e-4, 5.8e-4 and 4.1e-4, and came out both worse
+        # and three times noisier than the runs it was meant to reproduce. Where
+        # the budget is the control, it has to be spent in full.
+        if self.patience_steps == 0 or (self.patience_steps is None
+                                        and self.patience == 0):
+            return False
+
         if score > self.best_score + self.min_delta:
             self.best_score = score
             self.counter = 0
+            self.best_steps = steps_taken
         else:
             self.counter += 1
-            if self.counter >= self.patience and epoch >= self.min_epochs:
+            if self.patience_steps:
+                stalled = steps_taken - self.best_steps
+                past_floor = steps_taken >= (self.min_steps or 0)
+                if stalled >= self.patience_steps and past_floor:
+                    self.should_stop = True
+            elif self.counter >= self.patience and epoch >= self.min_epochs:
                 self.should_stop = True
         return self.should_stop
 
@@ -234,10 +302,18 @@ class CollapseDetector:
 # ============================================================================
 
 def save_checkpoint(model, optimizer, scheduler, scaler, epoch, best_score,
-                    config_dict, history, path):
-    """Saves a complete training state, sufficient to resume exactly."""
+                    config_dict, history, path, steps_taken=0):
+    """
+    Saves a complete training state, sufficient to resume exactly.
+
+    `steps_taken` is part of that state because the optimizer step count is what
+    every comparison in this project is controlled on. Without it a resumed run
+    restarts the counter at zero and reports the steps it took after the resume
+    as though they were the whole budget.
+    """
     torch.save({
         "epoch": epoch,
+        "steps_taken": steps_taken,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
@@ -253,7 +329,7 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
     Restores a training state saved by `save_checkpoint`.
 
     Returns:
-        tuple: (last_epoch, best_score, history)
+        tuple: (last_epoch, best_score, history, steps_taken)
     """
     ckpt = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -261,7 +337,14 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device):
     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     if scaler and ckpt.get("scaler_state_dict"):
         scaler.load_state_dict(ckpt["scaler_state_dict"])
-    return ckpt["epoch"], ckpt.get("best_score", -np.inf), ckpt.get("history", [])
+    # Checkpoints written before the step budget existed carry no count. Fall
+    # back to the history, which records it per epoch, rather than to zero.
+    steps = ckpt.get("steps_taken")
+    if steps is None:
+        rows = ckpt.get("history", [])
+        steps = int(rows[-1].get("optimizer_steps", 0)) if rows else 0
+    return (ckpt["epoch"], ckpt.get("best_score", -np.inf),
+            ckpt.get("history", []), int(steps))
 
 
 # ============================================================================
@@ -298,13 +381,17 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
                             n_adjacent=1, seed=42, patience=10, min_epochs=15,
                             exp_name="experiment", resume_path=None,
                             num_workers=2, save_nifti=False,
-                            lr_t_max=None, max_grad_norm=1.0,
+                            lr_t_max=None, max_steps=None, max_grad_norm=1.0,
+                            schedule_unit="epoch", patience_steps=None,
+                            min_steps=None, negative_ratio=1.0,
                             postproc_min_fraction=0.10,
                             tversky_alpha=0.3, tversky_beta=0.7,
                             preprocessed_name="preprocessed",
                             metadata_name="metadata",
                             surface_metrics=True,
-                            eval_sampling="all", second_eval_sampling=None):
+                            eval_sampling="all", second_eval_sampling=None,
+                            model_channels=None, mined_negatives_path=None,
+                            init_weights=None):
     """
     Runs one complete training and evaluation experiment for a single seed.
 
@@ -353,9 +440,21 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     os.makedirs(exp_dir, exist_ok=True)
 
     t_max = int(lr_t_max) if lr_t_max else epochs
+    # `max_steps` exists because an epoch is not a comparable unit here. At batch
+    # 16, `all` sampling gives ~898 optimizer steps per epoch and `positives`
+    # about 89, so two runs with the same epoch budget differ tenfold in how far
+    # the optimizer actually travels and in how quickly the cosine reaches its
+    # floor. Every sampling comparison in this project was made that way, and
+    # measured the budget rather than the sampling. Set `max_steps` to make the
+    # comparison the intended one; leaving it None reproduces the committed runs.
 
     exp_config = {
         "exp_name": exp_name, "seed": seed, "epochs": epochs,
+        "max_steps": int(max_steps) if max_steps else None,
+        "schedule_unit": schedule_unit,
+        "patience_steps": int(patience_steps) if patience_steps else None,
+        "min_steps": int(min_steps) if min_steps else None,
+        "negative_ratio": float(negative_ratio),
         "batch_size": batch_size, "lr": lr, "model_type": model_type,
         "loss_type": loss_type, "augment": augment, "sampling": sampling,
         "eval_sampling": eval_sampling,
@@ -366,6 +465,7 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         "lr_t_max": t_max, "max_grad_norm": max_grad_norm,
         "postproc_min_fraction": postproc_min_fraction,
         "tversky_alpha": tversky_alpha, "tversky_beta": tversky_beta,
+        "model_channels": list(model_channels) if model_channels else None,
     }
     with open(os.path.join(exp_dir, "config.json"), "w") as f:
         json.dump(exp_config, f, indent=4)
@@ -376,11 +476,24 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     preprocessed_dir = os.path.join(OUTPUT_DIR, preprocessed_name)
     metadata_dir = os.path.join(OUTPUT_DIR, metadata_name)
 
+    # Loaded before the split is built so a missing or stale file fails here,
+    # not sixty epochs later when the sampler quietly had nothing to draw from.
+    mined_scores = None
+    if mined_negatives_path:
+        from src.training.mine_negatives import load_mined
+        mined_scores, mined_meta = load_mined(mined_negatives_path)
+        q = mined_meta.get("quality", {})
+        print(f"  Mined negatives: {len(mined_scores)} patients from "
+              f"{mined_meta.get('run', '?')}, "
+              f"{q.get('fraction_with_false_positive', float('nan')):.1%} of "
+              f"negatives carry a false positive")
+
     loaders, datasets, index = build_dataloaders(
         preprocessed_dir, batch_size=batch_size, sampling=sampling,
+        negative_ratio=negative_ratio,
         augment=augment, crop=crop, crop_size=crop_size,
         n_adjacent=n_adjacent, seed=seed, num_workers=num_workers,
-        eval_sampling=eval_sampling)
+        eval_sampling=eval_sampling, mined_scores=mined_scores)
 
     # The second protocol's validation loader is built now rather than at the
     # end, because it is also read once per epoch as a diagnostic. Its curve is
@@ -415,9 +528,11 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     if crop == "tumor":
         print(f"  Crop: {crop_size}x{crop_size} tumour-centred (train only; "
               f"val/test stay full-size)")
-    print(f"  LR schedule: cosine over {t_max} epochs | "
-          f"grad clip: {max_grad_norm or 'off'}")
-    print(f"  Early stopping: patience={patience}, min_epochs={min_epochs}")
+    # Only the grad-clip half is settled at this point. The annealing period and
+    # the stopping rule are both rewritten further down once `max_steps` and
+    # `schedule_unit` are known, and printing them here as though they were
+    # final produced lines like "cosine over 44900 epochs" in the log.
+    print(f"  Grad clip: {max_grad_norm or 'off'}")
     print(f"  Slices: {n_train} train ({sampling}) | "
           f"{n_val} val | {n_test} test  (eval sampling: {eval_sampling})")
     if eval_sampling == "all":
@@ -427,14 +542,99 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         print(f"  [!] Validation and test use '{eval_sampling}', not the real "
               f"slice distribution. Scores from this run are not comparable "
               f"with runs evaluated on every slice.")
+        # Selection, not just reporting, is restricted here, and that is the
+        # part easiest to miss. Early stopping and the checkpoint both read
+        # `val_dice_soft` from this same loader, so the epoch kept is the one
+        # that looked best on tumour-bearing slices - where false positives on
+        # negative slices cannot count against it. For a model that will be
+        # handed whole volumes, that is the wrong selection criterion.
+        print(f"  [!] Checkpoint selection, early stopping and the threshold "
+              f"sweep all read the '{eval_sampling}' validation set. The epoch "
+              f"kept is the best on that subset, never penalised for false "
+              f"positives on the slices it excludes. Use "
+              f"--eval_sampling all if the model is meant for whole volumes.")
     if second_eval_sampling:
         print(f"  Second protocol: '{second_eval_sampling}' "
               f"({len(second_val_loader.dataset)} val | "
               f"{len(second_test_loader.dataset)} test slices), scored after "
               f"training with its own threshold sweep")
 
+    # --- Optimizer-step budget -------------------------------------------
+    steps_per_epoch = len(loaders["train"])
+    if max_steps:
+        epochs = max(1, -(-int(max_steps) // steps_per_epoch))
+        t_max = epochs if lr_t_max is None else int(lr_t_max)
+        print(f"  Step budget: {int(max_steps):,} optimizer steps at "
+              f"{steps_per_epoch} per epoch -> {epochs} epochs")
+    planned_steps = epochs * steps_per_epoch
+    print(f"  {steps_per_epoch} optimizer steps/epoch, {planned_steps:,} planned "
+          f"over {epochs} epochs")
+
+    # The scheduler's period, in whichever unit the caller chose. Epochs are the
+    # default because every committed run used them, but they are the wrong unit
+    # for comparing sampling modes: the same epoch count is a fivefold different
+    # number of updates, so the cosine reaches its floor after fivefold fewer
+    # steps. Under "step" the annealing spans `scheduler_t_max` optimizer steps
+    # regardless of how they are grouped into epochs.
+    if schedule_unit not in ("epoch", "step"):
+        raise ValueError(f"schedule_unit must be 'epoch' or 'step', "
+                         f"got {schedule_unit!r}")
+    per_step_schedule = schedule_unit == "step"
+    scheduler_t_max = (int(lr_t_max) if lr_t_max else planned_steps
+                       ) if per_step_schedule else t_max
+    if per_step_schedule:
+        share = 100.0 * scheduler_t_max / max(planned_steps, 1)
+        print(f"  LR schedule: cosine over {scheduler_t_max:,} optimizer steps "
+              f"(stepped per batch, not per epoch)")
+        print(f"               = {share:.0f}% of the {planned_steps:,}-step "
+              f"budget"
+              + ("" if share >= 99.5 else
+                 f", then held at eta_min for the last "
+                 f"{planned_steps - scheduler_t_max:,}"))
+    else:
+        print(f"  LR schedule: cosine over {t_max} epochs "
+              f"(stepped per epoch)")
+    if patience_steps:
+        print(f"  Early stopping: patience={int(patience_steps):,} steps, "
+              f"floor={int(min_steps or 0):,} steps")
+    elif patience_steps == 0 or patience == 0:
+        print(f"  Early stopping: disabled - the budget is spent in full")
+    else:
+        print(f"  Early stopping: patience={patience}, min_epochs={min_epochs}")
+
+    # The config was assembled before any of this ran, so it still holds the
+    # values the caller passed rather than the ones in force. A run whose
+    # config.json says epochs=50 and lr_t_max=50 when it actually ran 55 epochs
+    # under a 49 390-step cosine cannot be reproduced from its own record, and
+    # `base_corrected_seed42` said exactly that. Overwrite with what happened.
+    exp_config["epochs"] = epochs
+    exp_config["lr_t_max"] = t_max
+    exp_config["scheduler_t_max"] = scheduler_t_max
+    exp_config["scheduler_t_max_unit"] = "steps" if per_step_schedule else "epochs"
+    # `if patience_steps` folds 0 into None, and those mean opposite things:
+    # 0 disables early stopping, None falls back to the epoch counter.
+    exp_config["patience_steps"] = (int(patience_steps)
+                                    if patience_steps is not None else None)
+    exp_config["min_steps"] = int(min_steps) if min_steps is not None else None
+    exp_config["mined_negatives_path"] = mined_negatives_path
+    exp_config["init_weights"] = init_weights
+    exp_config["early_stopping_disabled"] = bool(
+        patience_steps == 0 or (patience_steps is None and patience == 0))
+    with open(os.path.join(exp_dir, "config.json"), "w") as f:
+        json.dump(exp_config, f, indent=2)
+
     # --- Model, loss, optimizer ------------------------------------------
-    model = build_model(model_type, in_channels=n_adjacent, out_channels=1).to(device)
+    model = build_model(model_type, in_channels=n_adjacent, out_channels=1,
+                        channels=model_channels).to(device)
+    if init_weights:
+        # Stage two of a two-stage run: take the weights and nothing else.
+        # `resume_path` restores the optimizer, scheduler and step counter too,
+        # which would continue the first stage rather than start a second with
+        # its own schedule and budget.
+        model.load_state_dict(torch.load(init_weights, map_location=device))
+        print(f"  Initialised from {init_weights} (weights only, fresh "
+              f"optimizer and schedule)")
+
     trainable_params, total_params = count_model_parameters(model)
     print(f"  Parameters: {trainable_params:,} trainable / {total_params:,} total")
 
@@ -444,21 +644,25 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     # eta_min keeps the annealed tail useful rather than frozen: with epochs
     # beyond lr_t_max the schedule holds here instead of stopping learning.
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=t_max, eta_min=lr * 0.01)
+        optimizer, T_max=scheduler_t_max, eta_min=lr * 0.01)
     scaler = GradScaler("cuda") if use_amp else None
 
     start_epoch = 1
     best_score = -np.inf
     history = []
+    resumed_steps = 0
 
     if resume_path and os.path.exists(resume_path):
-        last_epoch, best_score, history = load_checkpoint(
+        last_epoch, best_score, history, resumed_steps = load_checkpoint(
             resume_path, model, optimizer, scheduler, scaler, device)
         start_epoch = last_epoch + 1
-        print(f"  Resumed from epoch {last_epoch}, best score {best_score:.4f}")
+        print(f"  Resumed from epoch {last_epoch}, {resumed_steps:,} optimizer "
+              f"steps already taken, best score {best_score:.4f}")
 
     # --- Training loop ---------------------------------------------------
-    early_stopper = EarlyStopping(patience=patience, min_epochs=min_epochs)
+    early_stopper = EarlyStopping(patience=patience, min_epochs=min_epochs,
+                                  patience_steps=patience_steps,
+                                  min_steps=min_steps)
     early_stopper.best_score = best_score
     collapse_detector = CollapseDetector()
     best_model_path = os.path.join(exp_dir, "best_model.pt")
@@ -469,6 +673,7 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
 
     print()
     start_total = time.time()
+    steps_taken = resumed_steps
 
     for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
@@ -479,12 +684,16 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
 
         train_loss, n_nonfinite, n_batches = train_one_epoch(
             model, loaders["train"], criterion, optimizer, device, scaler,
-            max_grad_norm=max_grad_norm)
+            max_grad_norm=max_grad_norm,
+            scheduler=scheduler if per_step_schedule else None,
+            scheduler_t_max=scheduler_t_max)
+        steps_taken += n_batches - n_nonfinite
 
         # CosineAnnealingLR is periodic: stepping past T_max sends the learning
         # rate back up towards its peak. When the epoch budget is larger than the
-        # annealing period, hold at eta_min instead of climbing.
-        if scheduler.last_epoch < t_max:
+        # annealing period, hold at eta_min instead of climbing. Under a per-step
+        # schedule the same guard already ran inside the epoch.
+        if not per_step_schedule and scheduler.last_epoch < scheduler_t_max:
             scheduler.step()
 
         epoch_time = time.time() - epoch_start
@@ -508,6 +717,11 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
             "lr": round(optimizer.param_groups[0]["lr"], 8),
             "epoch_time_sec": round(epoch_time, 2),
             "nonfinite_batches": n_nonfinite,
+            # Cumulative optimizer steps, so any two runs can be compared at
+            # equal budget after the fact rather than at equal epochs. Skipped
+            # batches are excluded, since a step that did not happen did not
+            # move the weights.
+            "optimizer_steps": steps_taken,
         }
 
         second_soft = None
@@ -537,7 +751,8 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
               f"{second_note} | {epoch_time:.1f}s{marker}", flush=True)
 
         save_checkpoint(model, optimizer, scheduler, scaler, epoch, best_score,
-                        exp_config, history, checkpoint_path)
+                        exp_config, history, checkpoint_path,
+                        steps_taken=steps_taken)
 
         if diverged:
             print(f"\n  [DIVERGED] Every batch in epoch {epoch} produced a "
@@ -556,9 +771,14 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
                   f"epoch (val soft Dice {best_score:.4f}).")
             break
 
-        if early_stopper.step(val_soft, epoch):
-            print(f"\n  [EARLY STOP] No improvement in {patience} epochs "
-                  f"(past the {min_epochs}-epoch floor).")
+        if early_stopper.step(val_soft, epoch, steps_taken):
+            if patience_steps:
+                print(f"\n  [EARLY STOP] No improvement in "
+                      f"{int(patience_steps):,} optimizer steps "
+                      f"(past the {int(min_steps or 0):,}-step floor).")
+            else:
+                print(f"\n  [EARLY STOP] No improvement in {patience} epochs "
+                      f"(past the {min_epochs}-epoch floor).")
             break
 
     total_train_time = time.time() - start_total
@@ -576,9 +796,17 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     if os.path.exists(best_model_path):
         model.load_state_dict(torch.load(best_model_path, map_location=device))
 
+    # Swept in original geometry, which is the space the test numbers below are
+    # reported in. Sweeping in network space instead picks a threshold roughly
+    # one grid step too high; see `threshold_sweep`'s docstring.
     print("\n--- Threshold sweep on validation ---")
     val_probs, val_labels, _ = collect_predictions(model, loaders["val"], device)
-    best_threshold, sweep_results = threshold_sweep(val_probs, val_labels)
+    # A restricted eval_sampling means the model was never run on most slices,
+    # so full coverage cannot be required here either. The threshold that comes
+    # back is then the best one for that protocol and for no other.
+    is_oracle_eval = eval_sampling != "all"
+    best_threshold, sweep_results = threshold_sweep_original_geometry(
+        val_probs, metadata_dir, require_full_coverage=not is_oracle_eval)
 
     with open(os.path.join(exp_dir, "threshold_sweep.json"), "w") as f:
         json.dump({"best_threshold": best_threshold,
@@ -591,6 +819,7 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     test_probs, _, test_times = collect_predictions(model, loaders["test"], device)
     test_metrics, test_preds, test_gts, pp_counts = evaluate_full(
         test_probs, test_times, metadata_dir, threshold=best_threshold,
+        require_full_coverage=not is_oracle_eval,
         save_nifti_dir=os.path.join(exp_dir, "predictions") if save_nifti else None,
         postproc_min_fraction=postproc_min_fraction,
         surface_metrics=surface_metrics)
@@ -624,6 +853,7 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
     print(f"  Sensitivity:       {_mean('sensitivity_3d'):.4f}")
     print(f"  Precision:         {_mean('precision_3d'):.4f}")
     print(f"  Specificity:       {_mean('specificity_3d'):.4f}")
+    print(f"  Vol pred/true:     {_mean('volume_ratio_3d'):.3f}")
     print(f"  FP components:     {_mean('fp_components'):.2f}")
     print(f"  Failure rate:      {failure_rate:.1f}% ({failures}/{len(test_metrics)})")
     print(f"  Threshold:         {best_threshold:.2f} (chosen on validation)")
@@ -651,6 +881,14 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
         "total_train_time_sec": total_train_time,
         "gpu_memory_peak_mb": gpu_memory_mb,
         "epochs_run": len(history),
+        "optimizer_steps": steps_taken,
+        "steps_per_epoch": steps_per_epoch,
+        # True when the headline numbers below were computed on a slice subset.
+        # They are then an upper bound obtained with oracle knowledge of which
+        # slices hold tumour, not volume performance: on this dataset the same
+        # checkpoint scored 0.4645 that way and 0.0540 on every slice.
+        "oracle_positive_slices_evaluation": is_oracle_eval,
+        "eval_sampling": eval_sampling,
         "best_val_dice_soft": best_score,
         "optimal_threshold": best_threshold,
         "threshold_sweep": {str(k): v for k, v in sweep_results.items()},
@@ -712,13 +950,16 @@ def run_training_experiment(epochs=50, batch_size=16, lr=1e-3,
 
         print(f"\n--- Threshold sweep on validation ({second_eval_sampling}) ---")
         v_probs, v_labels, _ = collect_predictions(model, second_val_loader, device)
-        second_threshold, second_sweep = threshold_sweep(v_probs, v_labels)
+        second_threshold, second_sweep = threshold_sweep_original_geometry(
+            v_probs, metadata_dir,
+            require_full_coverage=(second_eval_sampling == "all"))
         del v_probs, v_labels
 
         print(f"\n--- Test evaluation (threshold={second_threshold:.2f}) ---")
         t_probs, _, t_times = collect_predictions(model, second_test_loader, device)
         second_metrics, second_preds, second_gts, _ = evaluate_full(
             t_probs, t_times, metadata_dir, threshold=second_threshold,
+            require_full_coverage=(second_eval_sampling == "all"),
             save_nifti_dir=None, postproc_min_fraction=postproc_min_fraction,
             surface_metrics=surface_metrics)
         del t_probs
@@ -856,11 +1097,64 @@ def main():
     parser.add_argument("--crop_size", type=int, default=DEFAULT_CROP_SIZE,
                         help="Side length of the --crop tumor window. Must be "
                              "divisible by 16 for the downsampling stages.")
-    parser.add_argument("--n_adjacent", type=int, default=1, choices=[1, 3, 5],
-                        help="1 = 2D, 3 or 5 = 2.5D with consecutive slices")
+    parser.add_argument("--model_channels", type=str, default=None,
+                        help="Comma-separated filters per encoder level, "
+                             "e.g. 32,64,128,256,512 to double the default "
+                             "width. Omit to keep each architecture's "
+                             "benchmark size, which every committed run used.")
+    parser.add_argument("--n_adjacent", type=int, default=1, choices=[1, 3, 5, 7, 9],
+                        help="1 = 2D, odd values above that = 2.5D with "
+                             "consecutive slices. What matters is the span in "
+                             "millimetres, not the channel count: at the "
+                             "default 1 mm slice spacing, 3 channels cover 3 mm "
+                             "of a lesion whose median extent is 23 mm, and the "
+                             "neighbours are partly interpolated. Pair a wide "
+                             "stack with a preprocessed set built at a coarser "
+                             "--slice_spacing.")
+    parser.add_argument("--preprocessed_name", type=str, default="preprocessed",
+                        help="Which preprocessed dataset under output/ to train "
+                             "on. Change it to train against a variant built by "
+                             "preprocessing's --out_name rather than the "
+                             "default one every committed run used.")
+    parser.add_argument("--metadata_name", type=str, default="metadata",
+                        help="Reconstruction metadata directory matching "
+                             "--preprocessed_name. A mismatched pair "
+                             "reconstructs into the wrong geometry and scores "
+                             "near zero without erroring.")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--negative_ratio", type=float, default=1.0,
+                        help="Negative slices drawn per positive under "
+                             "--sampling balanced. 1.0 is the committed default; "
+                             "the real distribution is roughly 11. Pair it with "
+                             "--max_steps, or the ratio changes the epoch size "
+                             "and the comparison measures the budget instead.")
+    parser.add_argument("--schedule_unit", type=str, default="epoch",
+                        choices=["epoch", "step"],
+                        help="Unit the cosine anneals in. 'epoch' reproduces "
+                             "every committed run. 'step' anneals over "
+                             "optimizer steps instead, which is the only unit "
+                             "two sampling modes share: the same epoch count "
+                             "is ~898 steps under --sampling all and ~177 at "
+                             "1:1, so an epoch-unit cosine reaches its floor "
+                             "after fivefold fewer updates in one of them.")
+    parser.add_argument("--patience_steps", type=int, default=None,
+                        help="Early-stopping patience in optimizer steps rather "
+                             "than epochs, for the same reason. Overrides "
+                             "--patience when set.")
+    parser.add_argument("--min_steps", type=int, default=None,
+                        help="Earliest step count at which early stopping may "
+                             "fire. Overrides --min_epochs when set.")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Total optimizer steps, converted to an epoch count "
+                             "from the sampling mode's steps per epoch. An epoch "
+                             "is not a comparable unit here: at batch 16, "
+                             "--sampling all gives ~898 steps per epoch and "
+                             "--sampling positives about 89, so equal epochs "
+                             "means a tenfold difference in optimizer travel. "
+                             "Use this whenever comparing sampling modes; omit "
+                             "it to reproduce the committed runs.")
     parser.add_argument("--lr_t_max", type=int, default=None,
                         help="Cosine annealing period in epochs. Defaults to "
                              "--epochs. Pin it when raising the epoch budget, "
@@ -898,9 +1192,16 @@ def main():
         eval_sampling=args.eval_sampling,
         second_eval_sampling=args.second_eval_sampling,
         crop=args.crop, crop_size=args.crop_size, n_adjacent=args.n_adjacent,
+        preprocessed_name=args.preprocessed_name,
+        metadata_name=args.metadata_name,
+        model_channels=([int(c) for c in args.model_channels.split(",")]
+                        if args.model_channels else None),
         patience=args.patience, min_epochs=args.min_epochs,
         exp_name=args.exp_name, num_workers=args.num_workers,
         save_nifti=args.save_nifti, lr_t_max=args.lr_t_max,
+        max_steps=args.max_steps, negative_ratio=args.negative_ratio,
+        schedule_unit=args.schedule_unit, patience_steps=args.patience_steps,
+        min_steps=args.min_steps,
         max_grad_norm=args.max_grad_norm,
         postproc_min_fraction=args.postproc_min_fraction,
         tversky_alpha=args.tversky_alpha, tversky_beta=args.tversky_beta,

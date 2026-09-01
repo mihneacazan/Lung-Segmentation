@@ -1,0 +1,28 @@
+{
+  "what": "The three committed baseline seeds re-scored with the threshold swept in original geometry instead of on the 192x192 grid. Same weights, same predictions; only where the threshold was chosen differs.",
+  "per_seed": {
+    "seed_42": {
+      "threshold_192_space": 0.75,
+      "dice_3d_192_space": 0.507,
+      "threshold_original_geometry": 0.65,
+      "dice_3d_original_geometry": 0.5201,
+      "delta": 0.0131
+    },
+    "seed_44": {
+      "threshold_192_space": 0.75,
+      "dice_3d_192_space": 0.4737,
+      "threshold_original_geometry": 0.6,
+      "dice_3d_original_geometry": 0.4901,
+      "delta": 0.0165
+    },
+    "seed_43": {
+      "threshold_192_space": 0.8,
+      "dice_3d_192_space": 0.4751,
+      "threshold_original_geometry": 0.7,
+      "dice_3d_original_geometry": 0.4898,
+      "delta": 0.0147
+    }
+  },
+  "mean_dice_192_space": 0.4852666666666667,
+  "mean_dice_original_geometry": 0.5
+}

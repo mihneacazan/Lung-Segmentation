@@ -1,0 +1,197 @@
+{
+  "summary": {
+    "n_runs": 23,
+    "n_threshold_changed": 15,
+    "n_regressed": 1,
+    "mean_delta": 0.0136,
+    "median_delta": 0.0131,
+    "max_delta": 0.0611,
+    "min_delta": -0.0028
+  },
+  "results": [
+    {
+      "run": "baseline/seed_42",
+      "old_threshold": 0.75,
+      "new_threshold": 0.65,
+      "old_dice_3d": 0.507,
+      "new_dice_3d": 0.5201,
+      "delta": 0.0131
+    },
+    {
+      "run": "baseline/seed_44",
+      "old_threshold": 0.75,
+      "new_threshold": 0.6,
+      "old_dice_3d": 0.4737,
+      "new_dice_3d": 0.4901,
+      "delta": 0.0165
+    },
+    {
+      "run": "baseline/seed_43",
+      "old_threshold": 0.8,
+      "new_threshold": 0.7,
+      "old_dice_3d": 0.4751,
+      "new_dice_3d": 0.4898,
+      "delta": 0.0147
+    },
+    {
+      "run": "unet_lowlr/seed_42",
+      "old_threshold": 0.6,
+      "new_threshold": 0.55,
+      "old_dice_3d": 0.4642,
+      "new_dice_3d": 0.4691,
+      "delta": 0.0049
+    },
+    {
+      "run": "crop96_attention_unet/seed_42",
+      "old_threshold": 0.99,
+      "new_threshold": 0.85,
+      "old_dice_3d": 0.3998,
+      "new_dice_3d": 0.4609,
+      "delta": 0.0611
+    },
+    {
+      "run": "segresnet/seed_42",
+      "old_threshold": 0.925,
+      "new_threshold": 0.75,
+      "old_dice_3d": 0.418,
+      "new_dice_3d": 0.4365,
+      "delta": 0.0185
+    },
+    {
+      "run": "unet_25d/seed_42",
+      "old_threshold": 0.6,
+      "new_threshold": 0.6,
+      "old_dice_3d": 0.4259,
+      "new_dice_3d": 0.4259,
+      "delta": 0.0
+    },
+    {
+      "run": "dice_focal/seed_42",
+      "old_threshold": 0.9,
+      "new_threshold": 0.75,
+      "old_dice_3d": 0.3536,
+      "new_dice_3d": 0.3808,
+      "delta": 0.0271
+    },
+    {
+      "run": "crop96_segresnet/seed_42",
+      "old_threshold": 0.95,
+      "new_threshold": 0.9,
+      "old_dice_3d": 0.3494,
+      "new_dice_3d": 0.3662,
+      "delta": 0.0168
+    },
+    {
+      "run": "hard_negatives_segresnet/seed_42",
+      "old_threshold": 0.97,
+      "new_threshold": 0.7,
+      "old_dice_3d": 0.3258,
+      "new_dice_3d": 0.3574,
+      "delta": 0.0316
+    },
+    {
+      "run": "hard_negatives_attention_unet/seed_42",
+      "old_threshold": 0.99,
+      "new_threshold": 0.8,
+      "old_dice_3d": 0.305,
+      "new_dice_3d": 0.3452,
+      "delta": 0.0402
+    },
+    {
+      "run": "attention_unet_50ep_pat10/seed_42",
+      "old_threshold": 0.93,
+      "new_threshold": 0.65,
+      "old_dice_3d": 0.3155,
+      "new_dice_3d": 0.3371,
+      "delta": 0.0216
+    },
+    {
+      "run": "attention_unet/seed_42",
+      "old_threshold": 0.93,
+      "new_threshold": 0.65,
+      "old_dice_3d": 0.3155,
+      "new_dice_3d": 0.3371,
+      "delta": 0.0216
+    },
+    {
+      "run": "hard_negatives_unet_25d/seed_42",
+      "old_threshold": 0.6,
+      "new_threshold": 0.55,
+      "old_dice_3d": 0.3203,
+      "new_dice_3d": 0.3332,
+      "delta": 0.0129
+    },
+    {
+      "run": "dicece_balanced/seed_42",
+      "old_threshold": 0.65,
+      "new_threshold": 0.6,
+      "old_dice_3d": 0.3023,
+      "new_dice_3d": 0.3167,
+      "delta": 0.0144
+    },
+    {
+      "run": "hard_negatives_unet/seed_42",
+      "old_threshold": 0.6,
+      "new_threshold": 0.6,
+      "old_dice_3d": 0.2659,
+      "new_dice_3d": 0.2659,
+      "delta": 0.0
+    },
+    {
+      "run": "no_augment/seed_42",
+      "old_threshold": 0.4,
+      "new_threshold": 0.45,
+      "old_dice_3d": 0.2648,
+      "new_dice_3d": 0.262,
+      "delta": -0.0028
+    },
+    {
+      "run": "crop96_unet_25d/seed_42",
+      "old_threshold": 0.95,
+      "new_threshold": 0.95,
+      "old_dice_3d": 0.1601,
+      "new_dice_3d": 0.1601,
+      "delta": 0.0
+    },
+    {
+      "run": "crop96_unet/seed_42",
+      "old_threshold": 0.97,
+      "new_threshold": 0.97,
+      "old_dice_3d": 0.1398,
+      "new_dice_3d": 0.1398,
+      "delta": 0.0
+    },
+    {
+      "run": "focal_tversky/seed_42",
+      "old_threshold": 0.99,
+      "new_threshold": 0.99,
+      "old_dice_3d": 0.1043,
+      "new_dice_3d": 0.1043,
+      "delta": 0.0
+    },
+    {
+      "run": "tversky_b06/seed_42",
+      "old_threshold": 0.99,
+      "new_threshold": 0.99,
+      "old_dice_3d": 0.0885,
+      "new_dice_3d": 0.0885,
+      "delta": 0.0
+    },
+    {
+      "run": "focal_tversky_b06/seed_42",
+      "old_threshold": 0.99,
+      "new_threshold": 0.99,
+      "old_dice_3d": 0.0864,
+      "new_dice_3d": 0.0864,
+      "delta": 0.0
+    },
+    {
+      "run": "tversky/seed_42",
+      "old_threshold": 0.99,
+      "new_threshold": 0.99,
+      "old_dice_3d": 0.0771,
+      "new_dice_3d": 0.0771,
+      "delta": 0.0
+    }
+  ]
+}

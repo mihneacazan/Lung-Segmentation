@@ -1,0 +1,17 @@
+{
+    "exp_name": "expF4_unet_lowlr",
+    "seed": 42,
+    "epochs": 100,
+    "batch_size": 16,
+    "lr": 0.0003,
+    "model_type": "unet",
+    "loss_type": "dice_ce",
+    "augment": "anatomic",
+    "sampling": "all",
+    "n_adjacent": 1,
+    "patience": 20,
+    "min_epochs": 15,
+    "lr_t_max": 50,
+    "max_grad_norm": 1.0,
+    "postproc_min_fraction": 0.1
+}

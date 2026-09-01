@@ -1,0 +1,1302 @@
+{
+  "0": {
+    "per_case": {
+      "lung_001": {
+        "tumour_retained": 0.7390396659707724,
+        "volume_kept": 0.1292512235585709
+      },
+      "lung_003": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12162019002920922
+      },
+      "lung_004": {
+        "tumour_retained": 0.3531746031746032,
+        "volume_kept": 0.0993862102814115
+      },
+      "lung_005": {
+        "tumour_retained": 0.9375415282392027,
+        "volume_kept": 0.14007603401511315
+      },
+      "lung_006": {
+        "tumour_retained": 0.454172366621067,
+        "volume_kept": 0.0754286484080744
+      },
+      "lung_009": {
+        "tumour_retained": 0.03004866180048662,
+        "volume_kept": 0.12151176146018026
+      },
+      "lung_010": {
+        "tumour_retained": 0.24600798403193613,
+        "volume_kept": 0.1438808391876615
+      },
+      "lung_014": {
+        "tumour_retained": 0.8905215419501133,
+        "volume_kept": 0.19518114172894022
+      },
+      "lung_015": {
+        "tumour_retained": 0.2923076923076923,
+        "volume_kept": 0.09526486356976557
+      },
+      "lung_016": {
+        "tumour_retained": 0.9991796554552912,
+        "volume_kept": 0.08926358170725743
+      },
+      "lung_018": {
+        "tumour_retained": 0.9926686217008798,
+        "volume_kept": 0.10996311718495438
+      },
+      "lung_020": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1369176218042286
+      },
+      "lung_022": {
+        "tumour_retained": 0.608420365535248,
+        "volume_kept": 0.06378860978890728
+      },
+      "lung_023": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1414700958783049
+      },
+      "lung_025": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1733851273148148
+      },
+      "lung_026": {
+        "tumour_retained": 0.051991150442477874,
+        "volume_kept": 0.12303331163194445
+      },
+      "lung_027": {
+        "tumour_retained": 0.1300563236047107,
+        "volume_kept": 0.17432028149801587
+      },
+      "lung_028": {
+        "tumour_retained": 0.2530683624801272,
+        "volume_kept": 0.0894283283809651
+      },
+      "lung_029": {
+        "tumour_retained": 0.5276967930029155,
+        "volume_kept": 0.0956487003811777
+      },
+      "lung_031": {
+        "tumour_retained": 0.5790479327952561,
+        "volume_kept": 0.17647008300351802
+      },
+      "lung_033": {
+        "tumour_retained": 0.47140323653291955,
+        "volume_kept": 0.07412079234182099
+      },
+      "lung_034": {
+        "tumour_retained": 0.3424260011607661,
+        "volume_kept": 0.09145047613670582
+      },
+      "lung_036": {
+        "tumour_retained": 0.4420583468395462,
+        "volume_kept": 0.13765039642062316
+      },
+      "lung_037": {
+        "tumour_retained": 0.2967032967032967,
+        "volume_kept": 0.14172402033730158
+      },
+      "lung_038": {
+        "tumour_retained": 0.844934527911785,
+        "volume_kept": 0.1742024217915331
+      },
+      "lung_041": {
+        "tumour_retained": 0.32522640542233866,
+        "volume_kept": 0.08953256369611669
+      },
+      "lung_042": {
+        "tumour_retained": 0.9995107632093934,
+        "volume_kept": 0.12517075932603278
+      },
+      "lung_043": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.13705581233285888
+      },
+      "lung_044": {
+        "tumour_retained": 0.8506073920909796,
+        "volume_kept": 0.11515330392826052
+      },
+      "lung_045": {
+        "tumour_retained": 0.544689800210305,
+        "volume_kept": 0.14864691149150744
+      },
+      "lung_046": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1845709882549921
+      },
+      "lung_047": {
+        "tumour_retained": 0.4815303430079156,
+        "volume_kept": 0.06436807671099755
+      },
+      "lung_048": {
+        "tumour_retained": 0.7020460358056266,
+        "volume_kept": 0.12781629437327469
+      },
+      "lung_049": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15678620018219627
+      },
+      "lung_051": {
+        "tumour_retained": 0.2869540873460246,
+        "volume_kept": 0.09965272184636312
+      },
+      "lung_053": {
+        "tumour_retained": 0.10424949076350355,
+        "volume_kept": 0.07228350791202229
+      },
+      "lung_054": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15704002097800926
+      },
+      "lung_055": {
+        "tumour_retained": 0.796044211751018,
+        "volume_kept": 0.13218840482535069
+      },
+      "lung_057": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1618770538814484
+      },
+      "lung_058": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.10465431495949074
+      },
+      "lung_059": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12915689703772038
+      },
+      "lung_061": {
+        "tumour_retained": 0.2929061784897025,
+        "volume_kept": 0.16591053478185963
+      },
+      "lung_062": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1659748901322424
+      },
+      "lung_064": {
+        "tumour_retained": 0.07241657036803585,
+        "volume_kept": 0.10044231503955411
+      },
+      "lung_065": {
+        "tumour_retained": 0.4070388129919479,
+        "volume_kept": 0.12287343343098958
+      },
+      "lung_066": {
+        "tumour_retained": 0.11938775510204082,
+        "volume_kept": 0.1213889793113426
+      },
+      "lung_069": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12559922148971023
+      },
+      "lung_070": {
+        "tumour_retained": 0.8687415426251691,
+        "volume_kept": 0.2061949925520309
+      },
+      "lung_071": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21087337540991513
+      },
+      "lung_073": {
+        "tumour_retained": 0.878139534883721,
+        "volume_kept": 0.08291868179563493
+      },
+      "lung_074": {
+        "tumour_retained": 0.8361895643848731,
+        "volume_kept": 0.17003832147696477
+      },
+      "lung_075": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19714769103378646
+      },
+      "lung_078": {
+        "tumour_retained": 0.9989601386481802,
+        "volume_kept": 0.19204834460282652
+      },
+      "lung_079": {
+        "tumour_retained": 0.9030769230769231,
+        "volume_kept": 0.09890477541844729
+      },
+      "lung_080": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1618766256734381
+      },
+      "lung_081": {
+        "tumour_retained": 0.6704545454545454,
+        "volume_kept": 0.08909855230734767
+      },
+      "lung_083": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.13345656864986066
+      },
+      "lung_084": {
+        "tumour_retained": 0.5465657741559954,
+        "volume_kept": 0.10298529730902778
+      },
+      "lung_086": {
+        "tumour_retained": 0.9981256890848953,
+        "volume_kept": 0.1555743645153531
+      },
+      "lung_092": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.07702979138205829
+      },
+      "lung_093": {
+        "tumour_retained": 0.9952305246422893,
+        "volume_kept": 0.1716824383802817
+      },
+      "lung_095": {
+        "tumour_retained": 0.7354497354497355,
+        "volume_kept": 0.14627133087737126
+      },
+      "lung_096": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.14047719406606127
+      }
+    },
+    "tumour_retained": 0.6967620710670833,
+    "tumour_retained_worst": 0.03004866180048662,
+    "volume_kept": 0.1310977687176785,
+    "cases_below_90": 36
+  },
+  "3": {
+    "per_case": {
+      "lung_001": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1645972714786641
+      },
+      "lung_003": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15730726265088207
+      },
+      "lung_004": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12601330976461564
+      },
+      "lung_005": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17346409904276427
+      },
+      "lung_006": {
+        "tumour_retained": 0.9972640218878249,
+        "volume_kept": 0.09968493138928124
+      },
+      "lung_009": {
+        "tumour_retained": 0.3902270884022709,
+        "volume_kept": 0.15256776200964095
+      },
+      "lung_010": {
+        "tumour_retained": 0.7027611443779108,
+        "volume_kept": 0.17907944654969546
+      },
+      "lung_014": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23424939141757245
+      },
+      "lung_015": {
+        "tumour_retained": 0.9784615384615385,
+        "volume_kept": 0.12345691208052344
+      },
+      "lung_016": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.11690648993789124
+      },
+      "lung_018": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1405812471998208
+      },
+      "lung_020": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16965078042064755
+      },
+      "lung_022": {
+        "tumour_retained": 0.9023498694516972,
+        "volume_kept": 0.08845920857477925
+      },
+      "lung_023": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17608340262090028
+      },
+      "lung_025": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2113642939814815
+      },
+      "lung_026": {
+        "tumour_retained": 0.5060840707964602,
+        "volume_kept": 0.16005274514873916
+      },
+      "lung_027": {
+        "tumour_retained": 0.564900153609831,
+        "volume_kept": 0.21404767511503714
+      },
+      "lung_028": {
+        "tumour_retained": 0.5605723370429253,
+        "volume_kept": 0.11757962044827279
+      },
+      "lung_029": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12323941492507887
+      },
+      "lung_031": {
+        "tumour_retained": 0.8426947784549498,
+        "volume_kept": 0.21607325678869832
+      },
+      "lung_033": {
+        "tumour_retained": 0.9185324761693637,
+        "volume_kept": 0.09894116981202847
+      },
+      "lung_034": {
+        "tumour_retained": 0.914103308183401,
+        "volume_kept": 0.11920517045882265
+      },
+      "lung_036": {
+        "tumour_retained": 0.7852512155591572,
+        "volume_kept": 0.1736293834229723
+      },
+      "lung_037": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17676814649470898
+      },
+      "lung_038": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.212295575698896
+      },
+      "lung_041": {
+        "tumour_retained": 0.7140172011163638,
+        "volume_kept": 0.11800973949623746
+      },
+      "lung_042": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1569172133747329
+      },
+      "lung_043": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17243648973969117
+      },
+      "lung_044": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1469122200459006
+      },
+      "lung_045": {
+        "tumour_retained": 0.961093585699264,
+        "volume_kept": 0.18675496505661712
+      },
+      "lung_046": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2289353653865164
+      },
+      "lung_047": {
+        "tumour_retained": 0.9452506596306068,
+        "volume_kept": 0.08239827132741527
+      },
+      "lung_048": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1616504950882074
+      },
+      "lung_049": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19008665352659493
+      },
+      "lung_051": {
+        "tumour_retained": 0.7396416573348265,
+        "volume_kept": 0.12823703062356814
+      },
+      "lung_053": {
+        "tumour_retained": 0.30252159865140127,
+        "volume_kept": 0.10123749751194268
+      },
+      "lung_054": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19880533854166665
+      },
+      "lung_055": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16900974976351976
+      },
+      "lung_057": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20099400111607144
+      },
+      "lung_058": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.13472837094907408
+      },
+      "lung_059": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16325420334281468
+      },
+      "lung_061": {
+        "tumour_retained": 0.9565217391304348,
+        "volume_kept": 0.2084497091019932
+      },
+      "lung_062": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20454311056105612
+      },
+      "lung_064": {
+        "tumour_retained": 0.3987113492313618,
+        "volume_kept": 0.13340691789711434
+      },
+      "lung_065": {
+        "tumour_retained": 0.7634126481498236,
+        "volume_kept": 0.15594940185546874
+      },
+      "lung_066": {
+        "tumour_retained": 0.7841836734693878,
+        "volume_kept": 0.1550390625
+      },
+      "lung_069": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15954369044735142
+      },
+      "lung_070": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.25027979056520644
+      },
+      "lung_071": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2534349983121142
+      },
+      "lung_073": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.10915270168199856
+      },
+      "lung_074": {
+        "tumour_retained": 0.9937769267592149,
+        "volume_kept": 0.2041529489188121
+      },
+      "lung_075": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.24080076585894405
+      },
+      "lung_078": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23612062926413255
+      },
+      "lung_079": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.13080755597845442
+      },
+      "lung_080": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20054776699658955
+      },
+      "lung_081": {
+        "tumour_retained": 0.9985795454545454,
+        "volume_kept": 0.11835184951836918
+      },
+      "lung_083": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17191284137169105
+      },
+      "lung_084": {
+        "tumour_retained": 0.9786573535118355,
+        "volume_kept": 0.13762396918402778
+      },
+      "lung_086": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1925123998598561
+      },
+      "lung_092": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.10313834101775957
+      },
+      "lung_093": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21222878994889477
+      },
+      "lung_095": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18243722476287264
+      },
+      "lung_096": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1743442285434473
+      }
+    },
+    "tumour_retained": 0.9142788879450222,
+    "tumour_retained_worst": 0.30252159865140127,
+    "volume_kept": 0.16508641692808163,
+    "cases_below_90": 13
+  },
+  "5": {
+    "per_case": {
+      "lung_001": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18831371285064877
+      },
+      "lung_003": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1809567894517951
+      },
+      "lung_004": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.14367502296309753
+      },
+      "lung_005": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19492299634836205
+      },
+      "lung_006": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.11600373214846202
+      },
+      "lung_009": {
+        "tumour_retained": 0.5899837793998378,
+        "volume_kept": 0.1733487898012707
+      },
+      "lung_010": {
+        "tumour_retained": 0.8847305389221557,
+        "volume_kept": 0.20249171237656885
+      },
+      "lung_014": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2596982504434632
+      },
+      "lung_015": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1421492716863359
+      },
+      "lung_016": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1355767526163928
+      },
+      "lung_018": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1609154008583822
+      },
+      "lung_020": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19174472946523355
+      },
+      "lung_022": {
+        "tumour_retained": 0.9800913838120104,
+        "volume_kept": 0.10462773135692605
+      },
+      "lung_023": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19878063687039826
+      },
+      "lung_025": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2366675347222222
+      },
+      "lung_026": {
+        "tumour_retained": 0.7132190265486725,
+        "volume_kept": 0.1844063977541371
+      },
+      "lung_027": {
+        "tumour_retained": 0.7604966717869943,
+        "volume_kept": 0.24005388738496286
+      },
+      "lung_028": {
+        "tumour_retained": 0.701939586645469,
+        "volume_kept": 0.13650547473179309
+      },
+      "lung_029": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1415961713820978
+      },
+      "lung_031": {
+        "tumour_retained": 0.9158293526601877,
+        "volume_kept": 0.2416703026513486
+      },
+      "lung_033": {
+        "tumour_retained": 0.9828197738860563,
+        "volume_kept": 0.11547700858410494
+      },
+      "lung_034": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.13764796936163806
+      },
+      "lung_036": {
+        "tumour_retained": 0.9043760129659644,
+        "volume_kept": 0.1971226662957468
+      },
+      "lung_037": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20005666473765432
+      },
+      "lung_038": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23715957685073896
+      },
+      "lung_041": {
+        "tumour_retained": 0.854075297602096,
+        "volume_kept": 0.13640429760079895
+      },
+      "lung_042": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17805650499131945
+      },
+      "lung_043": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19628291264988784
+      },
+      "lung_044": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16794023214921652
+      },
+      "lung_045": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2116960119205591
+      },
+      "lung_046": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2578798824263543
+      },
+      "lung_047": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.09431731559278914
+      },
+      "lung_048": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18375406732552624
+      },
+      "lung_049": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21247664417830434
+      },
+      "lung_051": {
+        "tumour_retained": 0.8980963045912654,
+        "volume_kept": 0.14730810490943586
+      },
+      "lung_053": {
+        "tumour_retained": 0.4271967408864227,
+        "volume_kept": 0.12110480803255484
+      },
+      "lung_054": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2256273509837963
+      },
+      "lung_055": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1932999845711056
+      },
+      "lung_057": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22682717943948413
+      },
+      "lung_058": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15508192274305554
+      },
+      "lung_059": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18592644910824108
+      },
+      "lung_061": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23610945451653945
+      },
+      "lung_062": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22972066086817014
+      },
+      "lung_064": {
+        "tumour_retained": 0.5640298350667087,
+        "volume_kept": 0.15485415823894283
+      },
+      "lung_065": {
+        "tumour_retained": 0.9008414005247444,
+        "volume_kept": 0.1776418897840712
+      },
+      "lung_066": {
+        "tumour_retained": 0.9642857142857143,
+        "volume_kept": 0.17748435691550926
+      },
+      "lung_069": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18196100887666114
+      },
+      "lung_070": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.27931588830144344
+      },
+      "lung_071": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.28169819396219137
+      },
+      "lung_073": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1266904007992875
+      },
+      "lung_074": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22616045089487352
+      },
+      "lung_075": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2698273995682296
+      },
+      "lung_078": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2652864392970273
+      },
+      "lung_079": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15225376226963142
+      },
+      "lung_080": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22627009116127916
+      },
+      "lung_081": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1377586665546595
+      },
+      "lung_083": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19750406816004876
+      },
+      "lung_084": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16066279658564814
+      },
+      "lung_086": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21701331693963352
+      },
+      "lung_092": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12079918032786885
+      },
+      "lung_093": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23913784355438183
+      },
+      "lung_095": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20645629551998645
+      },
+      "lung_096": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1964579959880253
+      }
+    },
+    "tumour_retained": 0.9530478003108619,
+    "tumour_retained_worst": 0.4271967408864227,
+    "volume_kept": 0.1875653519269892,
+    "cases_below_90": 9
+  },
+  "8": {
+    "per_case": {
+      "lung_001": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22452264083059212
+      },
+      "lung_003": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.216649302533078
+      },
+      "lung_004": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17034218169614018
+      },
+      "lung_005": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22738479464813408
+      },
+      "lung_006": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.14101105789979598
+      },
+      "lung_009": {
+        "tumour_retained": 0.8091646390916464,
+        "volume_kept": 0.20488419769503546
+      },
+      "lung_010": {
+        "tumour_retained": 0.9945109780439122,
+        "volume_kept": 0.23811614641011444
+      },
+      "lung_014": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.29782185577540005
+      },
+      "lung_015": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17069647659762363
+      },
+      "lung_016": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1643044437414417
+      },
+      "lung_018": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19154506570238677
+      },
+      "lung_020": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22517290270590057
+      },
+      "lung_022": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.12966094813511772
+      },
+      "lung_023": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23248952842620482
+      },
+      "lung_025": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2751561053240741
+      },
+      "lung_026": {
+        "tumour_retained": 0.9153761061946902,
+        "volume_kept": 0.2214127488733747
+      },
+      "lung_027": {
+        "tumour_retained": 0.9339477726574501,
+        "volume_kept": 0.2789267475884414
+      },
+      "lung_028": {
+        "tumour_retained": 0.8491891891891892,
+        "volume_kept": 0.16542083653289708
+      },
+      "lung_029": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16949229703382404
+      },
+      "lung_031": {
+        "tumour_retained": 0.9735793114808104,
+        "volume_kept": 0.28029448040347404
+      },
+      "lung_033": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1411070856374314
+      },
+      "lung_034": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16601658068447003
+      },
+      "lung_036": {
+        "tumour_retained": 0.9821717990275527,
+        "volume_kept": 0.2329023482577069
+      },
+      "lung_037": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23574399594907408
+      },
+      "lung_038": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.27458438710269767
+      },
+      "lung_041": {
+        "tumour_retained": 0.9705530557612349,
+        "volume_kept": 0.16446178015259197
+      },
+      "lung_042": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21033149567085113
+      },
+      "lung_043": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23312262093469635
+      },
+      "lung_044": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20007876800411523
+      },
+      "lung_045": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.24958566934271054
+      },
+      "lung_046": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.30149407498022934
+      },
+      "lung_047": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.11261852165771313
+      },
+      "lung_048": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2172089149575138
+      },
+      "lung_049": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2465878441220238
+      },
+      "lung_051": {
+        "tumour_retained": 0.9893617021276596,
+        "volume_kept": 0.1767436898177978
+      },
+      "lung_053": {
+        "tumour_retained": 0.5989885509587694,
+        "volume_kept": 0.15142524217091294
+      },
+      "lung_054": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2663160988136574
+      },
+      "lung_055": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23048542257867294
+      },
+      "lung_057": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.26557781885540677
+      },
+      "lung_058": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18631483289930556
+      },
+      "lung_059": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2201584882059758
+      },
+      "lung_061": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.27719165391088846
+      },
+      "lung_062": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2678527943940227
+      },
+      "lung_064": {
+        "tumour_retained": 0.7478376580172987,
+        "volume_kept": 0.1877639808915408
+      },
+      "lung_065": {
+        "tumour_retained": 0.9923097801501854,
+        "volume_kept": 0.21047905815972223
+      },
+      "lung_066": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21139720775462964
+      },
+      "lung_069": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2159421575073828
+      },
+      "lung_070": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3230885239646274
+      },
+      "lung_071": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.32419004087094905
+      },
+      "lung_073": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.15352235383973664
+      },
+      "lung_074": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.25902857173102983
+      },
+      "lung_075": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3134703419482204
+      },
+      "lung_078": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3099087780214425
+      },
+      "lung_079": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.18533838168847935
+      },
+      "lung_080": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2654665837225682
+      },
+      "lung_081": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16745701724910395
+      },
+      "lung_083": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23691708980973528
+      },
+      "lung_084": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.19613633897569444
+      },
+      "lung_086": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.25427474873452144
+      },
+      "lung_092": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.14800889756944444
+      },
+      "lung_093": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2801092443331866
+      },
+      "lung_095": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.24286519581155633
+      },
+      "lung_096": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22966077320935718
+      }
+    },
+    "tumour_retained": 0.9802696911539746,
+    "tumour_retained_worst": 0.5989885509587694,
+    "volume_kept": 0.2217180979912134,
+    "cases_below_90": 4
+  },
+  "12": {
+    "per_case": {
+      "lung_001": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.272386428208379
+      },
+      "lung_003": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2626032780582637
+      },
+      "lung_004": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20524238369569606
+      },
+      "lung_005": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.27150037070457617
+      },
+      "lung_006": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1743918093808851
+      },
+      "lung_009": {
+        "tumour_retained": 0.9793998377939984,
+        "volume_kept": 0.24650079533281619
+      },
+      "lung_010": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2851708497715947
+      },
+      "lung_014": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3481125393927385
+      },
+      "lung_015": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20902145865948138
+      },
+      "lung_016": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20346360661800664
+      },
+      "lung_018": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.23188562477089442
+      },
+      "lung_020": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.26863554936305734
+      },
+      "lung_022": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.16447299398684695
+      },
+      "lung_023": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.27610212987366134
+      },
+      "lung_025": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3269627459490741
+      },
+      "lung_026": {
+        "tumour_retained": 0.9997234513274337,
+        "volume_kept": 0.27113115026595747
+      },
+      "lung_027": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3294094385870483
+      },
+      "lung_028": {
+        "tumour_retained": 0.9477901430842607,
+        "volume_kept": 0.20452550469640313
+      },
+      "lung_029": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20682938258521733
+      },
+      "lung_031": {
+        "tumour_retained": 0.9985175424147587,
+        "volume_kept": 0.3321885707545441
+      },
+      "lung_033": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.17486463423782578
+      },
+      "lung_034": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20453264971017765
+      },
+      "lung_036": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2814542957158754
+      },
+      "lung_037": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2846327470513668
+      },
+      "lung_038": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.32426587400952633
+      },
+      "lung_041": {
+        "tumour_retained": 0.9999430426610468,
+        "volume_kept": 0.20163811010660534
+      },
+      "lung_042": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.25414969506766383
+      },
+      "lung_043": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2836582981528209
+      },
+      "lung_044": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.24392067431346945
+      },
+      "lung_045": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.30059430013711963
+      },
+      "lung_046": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.359425488551552
+      },
+      "lung_047": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.137314983717134
+      },
+      "lung_048": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2603924884888285
+      },
+      "lung_049": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.29230094043326466
+      },
+      "lung_051": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.21691810634128006
+      },
+      "lung_053": {
+        "tumour_retained": 0.7819063004846527,
+        "volume_kept": 0.19178818407753892
+      },
+      "lung_054": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.32130298755787035
+      },
+      "lung_055": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.28013392857142855
+      },
+      "lung_057": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.31608973911830357
+      },
+      "lung_058": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.22880814163773147
+      },
+      "lung_059": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.26385105159645345
+      },
+      "lung_061": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.33047798551473706
+      },
+      "lung_062": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3192242971041896
+      },
+      "lung_064": {
+        "tumour_retained": 0.9024057148860174,
+        "volume_kept": 0.23297784140709277
+      },
+      "lung_065": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2544620090060764
+      },
+      "lung_066": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.25575448495370373
+      },
+      "lung_069": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.26155490811877075
+      },
+      "lung_070": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.38046681588830145
+      },
+      "lung_071": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3801280834056713
+      },
+      "lung_073": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1888174962515783
+      },
+      "lung_074": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.30306268937255343
+      },
+      "lung_075": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.36984996029107564
+      },
+      "lung_078": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3706615306712963
+      },
+      "lung_079": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.2309375556445869
+      },
+      "lung_080": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.31792399571223806
+      },
+      "lung_081": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.20741032426075268
+      },
+      "lung_083": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.29102931592324105
+      },
+      "lung_084": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.24464907045717593
+      },
+      "lung_086": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3046093880731258
+      },
+      "lung_092": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.1843480511441257
+      },
+      "lung_093": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.3352743277154245
+      },
+      "lung_095": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.29142167537746805
+      },
+      "lung_096": {
+        "tumour_retained": 1.0,
+        "volume_kept": 0.27333134056156516
+      }
+    },
+    "tumour_retained": 0.993804540200828,
+    "tumour_retained_worst": 0.7819063004846527,
+    "volume_kept": 0.2673166202556147,
+    "cases_below_90": 1
+  }
+}

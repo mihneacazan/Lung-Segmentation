@@ -8,12 +8,25 @@ The dataset is 63 annotated CT volumes, split 44 / 9 / 10 by patient. Tumours
 occupy well under 1% of a volume, which is what makes the task hard and what most
 of the design decisions below are responding to.
 
-**Best configuration: 2D U-Net, DiceCE loss, every slice, anatomically valid
-augmentation — Dice 0.4853 ± 0.0153 over three seeds.** 21 configurations
-were compared under identical conditions. The two effects that mattered were the
-slice sampling strategy (+0.18 Dice) and the augmentation policy (+0.22); the
-choice of architecture trailed far behind both, and at 10 test patients the
-alternatives to the baseline U-Net were not statistically separable from it.
+**Best configuration: 2D U-Net at 320 × 320 with 5 adjacent slices as input
+channels — Dice 3D 0.5659 raw, 0.5834 after post-processing**, measured on every
+slice of every test volume in original geometry. False-positive components fall
+from 5.30 to 0.80 per patient under the same post-processing, and precision rises
+to 0.7004 while sensitivity holds at 0.5527.
+
+Around 30 configurations were compared under identical conditions and a matched
+budget of 49,390 optimiser steps. Two things moved the result and they move
+different metrics: **inter-slice context** cuts false-positive components by 64%
+at unchanged agreement, because a tumour persists across slices while a vessel
+crossing the plane does not; **in-plane resolution** raises Dice but leaves false
+positives untouched. Architecture, loss function and negative-sampling strategy
+all trailed far behind, and at 10 test patients most alternatives were not
+statistically separable from the baseline — a difference has to clear ±0.1209 to
+be distinguishable from the random seed.
+
+A lung mask, tried as a way to suppress predictions outside the lung fields, was
+measured and rejected: it discards 73% of the image and removes 5% of the false
+positives, because they are vessels and nodules *inside* the lungs.
 
 ---
 
@@ -55,15 +68,27 @@ python -m src.eda.eda_report                  # dataset audit and statistics
 python -m src.preprocessing.create_split      # deterministic 44 / 9 / 10 patient split
 python -m src.preprocessing.preprocessing     # ~40 min, includes geometry QC
 python -m src.visualization.overlay_check     # visual image/mask alignment check
-python -m pytest tests/ -q                    # 107 regression tests
+python -m pytest tests/ -q                    # regression suite
 
-# the winning configuration
-python -m src.training.train --exp_name baseline --loss_type dice_ce \
-    --sampling all --epochs 100 --lr_t_max 50 --patience 20 --seeds 42,43,44
+# preprocess at the grid the best configuration uses
+python -m src.preprocessing.preprocessing --target_size 320 --out_name pp320
+
+# the best configuration: 320 x 320, 5 input channels, budget in optimiser steps
+python -m src.training.train --exp_name stretch320_n5 --loss_type dice_ce \
+    --sampling all --n_adjacent 5 --schedule_unit step \
+    --max_steps 49390 --lr_t_max 44900 --patience_steps 0 --seed 42
+
+# the corrected baseline it is measured against
+python -m src.training.train --exp_name baseline_corrected --loss_type dice_ce \
+    --sampling all --schedule_unit step \
+    --max_steps 49390 --lr_t_max 44900 --patience_steps 0 --seeds 42,43
 ```
 
 See [EXPERIMENTS.md](EXPERIMENTS.md) for the full results, the reasoning behind
-each configuration, and a chronological journal of what was tried.
+each configuration, and a chronological journal of what was tried. Every measured
+figure is collected in
+[`output/all_experiment_results.csv`](output/all_experiment_results.csv), one row
+per arm per checkpoint.
 
 ---
 
@@ -177,7 +202,7 @@ patch-trained segmentation networks.
 
 ```bash
 python -m src.evaluation.evaluate \
-    --checkpoint output/experiments/crop96_unet/seed_42/best_model.pt \
+    --checkpoint output/experiments/tumourcrop96_unet/seed_42/best_model.pt \
     --split test --sw_roi 96
 ```
 
@@ -203,12 +228,12 @@ cannot silently disagree.
 ```bash
 # choose a threshold — validation only, refused on test
 python -m src.evaluation.evaluate \
-    --checkpoint output/experiments/baseline/seed_42/best_model.pt \
+    --checkpoint output/experiments/baseline_unet_dicece_allslices/seed_42/best_model.pt \
     --split val --sweep_threshold
 
 # apply it to the held-out test set
 python -m src.evaluation.evaluate \
-    --checkpoint output/experiments/baseline/seed_42/best_model.pt \
+    --checkpoint output/experiments/baseline_unet_dicece_allslices/seed_42/best_model.pt \
     --split test --threshold 0.45 --save_nifti
 ```
 
@@ -218,6 +243,24 @@ the same overlap scored per slice — once over tumour-bearing slices only, once
 over every slice. Reported in aggregate: macro-average, micro-average, and a
 breakdown by tumour size. `--save_nifti` writes predictions carrying the
 patient's original affine, so they overlay on the source CT in any viewer.
+
+**Every slice is predicted before anything is scored.** `stack_slice_predictions`
+raises rather than filling an unpredicted slice with zeros, because a zero-filled
+slice is a confident "no tumour here" the model never made — under an evaluation
+restricted to tumour slices that would be 2,999 of 3,272 test slices, worth up to
++0.39 Dice. An evaluation on a slice subset is still available, but it must be
+asked for and every report it produces is stamped
+`oracle_positive_slices_evaluation`.
+
+**The threshold is swept in original geometry**, after the probability volumes are
+reconstructed, since interpolation moves mass across the decision boundary and the
+optimum before reconstruction is not the optimum after it. It is chosen on
+validation only — `evaluate.py` refuses `--split test` — and re-swept per
+checkpoint, because the optimum moves with the weights.
+
+`protocol_matrix.py` scores both protocols at seven thresholds on one grid, which
+is what separates a threshold effect from a slice-set effect; the matrices live in
+`output/protocol_matrices/`.
 
 The headline number this project quotes is 3D Dice per patient, where a false
 positive anywhere in the scan counts against the score. Much of the pulmonary
@@ -243,6 +286,11 @@ All share the same split, the same evaluation code, the same checkpoint selectio
 rule, and the same code version. Each changes **one variable** against the
 baseline. Full results, per-experiment reasoning and the journal are in
 [EXPERIMENTS.md](EXPERIMENTS.md).
+
+Sections 1–12 predate the evaluation corrections; sections 13–20 were run after
+them, at a matched budget of 49,390 optimiser steps, and are directly comparable
+with each other. [Evaluation protocol](EXPERIMENTS.md#evaluation-protocol)
+describes the seven fixes and what each one cost.
 
 ```bash
 COMMON="--sampling all --epochs 100 --lr_t_max 50 --patience 20"
@@ -307,7 +355,9 @@ an earlier epoch budget — exist to isolate a specific question raised by these
 results rather than to test a new idea; they're covered in EXPERIMENTS.md rather
 than repeated here.
 
-Each run writes to `output/experiments/{exp_name}/seed_{seed}/`:
+Each run writes to `output/experiments/{run}/seed_{seed}/`, one directory per
+configuration and named for what it varies
+([index](output/experiments/README.md)):
 `config.json`, `best_model.pt`, `checkpoint.pt`, `training_history.csv`,
 `threshold_sweep.json`, `test_results_per_patient.csv`, `benchmark_report.json`.
 `baseline/`, having three seeds, additionally has a `multi_seed_summary.json` one

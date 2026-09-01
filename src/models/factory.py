@@ -19,7 +19,8 @@ from src.models.segresnet import build_segresnet
 MODEL_TYPES = ("unet", "attention_unet", "segresnet")
 
 
-def build_model(model_type: str, in_channels: int = 1, out_channels: int = 1):
+def build_model(model_type: str, in_channels: int = 1, out_channels: int = 1,
+                channels=None):
     """
     Builds a segmentation network by name.
 
@@ -28,6 +29,12 @@ def build_model(model_type: str, in_channels: int = 1, out_channels: int = 1):
         in_channels (int): Input channels. 1 for plain 2D, or n_adjacent for a
             2.5D model that stacks consecutive slices as channels.
         out_channels (int): Output channels (1 for binary segmentation).
+        channels (tuple|None): Width of the network, filters per encoder level.
+            None keeps each architecture's benchmark default, which is what
+            every committed experiment used. Passing a tuple changes capacity
+            without changing anything else, so a width comparison stays a
+            one-variable change. SegResNet takes only the first entry, since it
+            is parameterised by a single initial filter count.
 
     Returns:
         torch.nn.Module: The requested model.
@@ -36,11 +43,14 @@ def build_model(model_type: str, in_channels: int = 1, out_channels: int = 1):
         ValueError: If model_type is not recognised.
     """
     if model_type == "unet":
-        return build_unet_2d(in_channels=in_channels, out_channels=out_channels)
+        return build_unet_2d(in_channels=in_channels, out_channels=out_channels,
+                             channels=channels)
     if model_type == "attention_unet":
-        return build_attention_unet(in_channels=in_channels, out_channels=out_channels)
+        return build_attention_unet(in_channels=in_channels,
+                                    out_channels=out_channels, channels=channels)
     if model_type == "segresnet":
-        return build_segresnet(in_channels=in_channels, out_channels=out_channels)
+        return build_segresnet(in_channels=in_channels, out_channels=out_channels,
+                               channels=channels)
 
     raise ValueError(
         f"Unknown model_type: {model_type!r}. Choose from: {', '.join(MODEL_TYPES)}"

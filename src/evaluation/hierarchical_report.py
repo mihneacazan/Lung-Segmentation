@@ -68,15 +68,25 @@ from src.models.factory import build_model
 DEFAULT_RUNS = ("baseline", "unet_25d", "attention_unet", "segresnet")
 
 
-def load_run(run_dir):
-    """Builds the architecture recorded in config.json and loads its weights."""
+def load_run(run_dir, weights="best_model.pt"):
+    """
+    Builds the architecture recorded in config.json and loads its weights.
+
+    `weights` names the file to read. The default is the epoch that scored best
+    on validation, which is what every result in this project quotes. Passing
+    "checkpoint.pt" instead loads the *final* epoch, which is a different model:
+    validation jitter falls roughly twelvefold as the cosine anneals - 0.056 per
+    epoch early against 0.005 at eta_min - so an argmax over that curve lands in
+    the noisy phase almost regardless of which model is better. Scoring both is
+    the only way to find out how much of the reported number is selection luck.
+    """
     with open(os.path.join(run_dir, "config.json")) as f:
         config = json.load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(config["model_type"], in_channels=config["n_adjacent"],
                         out_channels=1).to(device)
-    state = torch.load(os.path.join(run_dir, "best_model.pt"),
+    state = torch.load(os.path.join(run_dir, weights),
                        map_location=device, weights_only=False)
     model.load_state_dict(state.get("model_state_dict", state))
     model.eval()
@@ -90,19 +100,33 @@ def load_run(run_dir):
     return model, device, config, threshold
 
 
-def predict_patient(model, device, config, case_id, preprocessed_name="preprocessed"):
+def predict_patient(model, device, config, case_id, preprocessed_name="preprocessed",
+                    img=None):
     """
     Runs the model over every slice of one patient.
 
     Neighbour selection for the 2.5D models replicates `LungSliceDataset`, edge
     clipping included: out-of-range neighbours repeat the edge slice rather than
     being zero-filled, because zero is a real intensity here and means air.
+
+    Args:
+        model, device, config: The loaded run, as returned by `load_run`.
+        case_id (str): Patient identifier, used to find the volume on disk.
+        preprocessed_name (str): Which preprocessed dataset to read from.
+        img (np.ndarray|None): An (H, W, D) volume to use instead of the stored
+            one. Test-time augmentation passes an intensity-transformed copy
+            here; `case_id` is then only used for error messages, so the caller
+            is responsible for the two matching.
+
+    Returns:
+        np.ndarray: (H, W, D) probabilities.
     """
     n_adjacent = config["n_adjacent"]
     half = n_adjacent // 2
 
-    volumes = os.path.join(OUTPUT_DIR, preprocessed_name, "volumes")
-    img = np.load(os.path.join(volumes, f"{case_id}_img.npy"), mmap_mode="r")
+    if img is None:
+        volumes = os.path.join(OUTPUT_DIR, preprocessed_name, "volumes")
+        img = np.load(os.path.join(volumes, f"{case_id}_img.npy"), mmap_mode="r")
     n_slices = img.shape[2]
 
     probs = np.zeros((img.shape[0], img.shape[1], n_slices), dtype=np.float32)

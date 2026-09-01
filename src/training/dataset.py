@@ -150,13 +150,19 @@ CROP_MODES = ("none", "tumor")
 # leaving only delineation. A model trained on it has never been shown an empty
 # slice and so has no reason to leave one empty, which makes it useful for
 # measuring one half of the task in isolation and useless as a deployable model.
-SAMPLING_MODES = ("all", "balanced", "hard_negatives", "positives")
+SAMPLING_MODES = ("all", "balanced", "hard_negatives", "mined_negatives",
+                  "positives")
 
 # 96 x 96 out of the preprocessed 192 x 192. The largest tumour bounding box in
 # the training split measures 38 x 57 px at 1 mm spacing, so this holds every
 # lesion in the dataset with surrounding context to spare, and it stays divisible
 # by 16 as the four downsampling stages of the U-Net require.
 DEFAULT_CROP_SIZE = 96
+
+# Exponent on (1 + false-positive pixels) when oversampling mined negatives.
+# Squaring lifted the share of drawn slices carrying a real false positive from
+# 33% to 58% on the committed baseline, without ever excluding a slice outright.
+MINED_WEIGHT_POWER = 2.0
 
 
 def _crop_tumor_centered(img, lbl, rng, size):
@@ -250,11 +256,18 @@ class LungSliceDataset(Dataset):
 
     def __init__(self, volumes_dir, index, case_ids, sampling="all",
                  augment="none", crop="none", crop_size=DEFAULT_CROP_SIZE,
-                 n_adjacent=1, seed=42):
+                 n_adjacent=1, seed=42, negative_ratio=1.0,
+                 mined_scores=None):
         if n_adjacent % 2 != 1:
             raise ValueError(f"n_adjacent must be odd, got {n_adjacent}")
         if sampling not in SAMPLING_MODES:
             raise ValueError(f"Unknown sampling mode: {sampling}")
+        if sampling == "mined_negatives" and not mined_scores:
+            raise ValueError(
+                "sampling='mined_negatives' needs mined_scores - run "
+                "src.training.mine_negatives first. Without it the mode would "
+                "silently degrade to random negatives and the comparison "
+                "against hard_negatives would measure nothing.")
         if augment not in AUGMENTATIONS:
             raise ValueError(f"Unknown augment mode: {augment}")
         if crop not in CROP_MODES:
@@ -271,6 +284,13 @@ class LungSliceDataset(Dataset):
         self.n_adjacent = n_adjacent
         self.half_window = n_adjacent // 2
         self.seed = seed
+        # Negatives drawn per positive under `balanced`. 1.0 reproduces the
+        # committed runs. The real distribution is roughly 1:11, and the useful
+        # question is where between the two the model does best - which cannot be
+        # asked while the ratio is fixed.
+        self.negative_ratio = float(negative_ratio)
+        # {case_id: [slice indices, worst first]} from mine_negatives.
+        self.mined_scores = mined_scores or {}
 
         # Volumes are memory-mapped lazily and cached per worker process.
         self._cache = {}
@@ -311,20 +331,55 @@ class LungSliceDataset(Dataset):
                 body = set(info["body_slices"])
                 negatives = sorted(body - set(positives))
 
-                if self.sampling == "hard_negatives" and positives:
-                    # Negatives immediately above and below the tumour look most
-                    # like it and are where false positives actually appear.
+                if (self.sampling in ("hard_negatives", "mined_negatives")
+                        and positives):
+                    # Both modes take 70% of their negatives from a "hard" set
+                    # and 30% from everything else; only the definition of hard
+                    # differs, so a comparison between them measures the
+                    # selection rule rather than how much data each one saw.
+                    #
+                    # `negative_ratio` scales the negative half, which is what
+                    # lets a second training stage keep hard negatives while
+                    # weighting the mix towards positives. At the default of 1.0
+                    # the budget is one negative per positive, reproducing every
+                    # run committed before this parameter was honoured here.
                     lo, hi = min(positives), max(positives)
                     margin = max(10, (hi - lo))
                     near = [s for s in negatives if lo - margin <= s <= hi + margin]
-                    near_set = set(near)
-                    far = [s for s in negatives if s not in near_set]
-                    n_near = min(len(near), int(0.7 * len(positives)))
-                    n_far = min(len(far), len(positives) - n_near)
-                    picked = list(rng.choice(near, n_near, replace=False)) if n_near else []
-                    picked += list(rng.choice(far, n_far, replace=False)) if n_far else []
+
+                    wanted = int(round(self.negative_ratio * len(positives)))
+                    n_near = min(len(near), int(0.7 * wanted))
+
+                    if self.sampling == "mined_negatives":
+                        # Oversample by measured error rather than truncate to a
+                        # pool and draw flat inside it. Only 998 of 12,949
+                        # training negatives carry a false positive at all, so a
+                        # pool sized to match the distance mode cannot be more
+                        # than 38% real errors, and drawing uniformly inside it
+                        # yielded 33%. Weighting the draw instead reached 58%
+                        # while leaving every negative reachable, so epochs still
+                        # differ. Both measured before the experiment was run.
+                        scores = self.mined_scores.get(case_id, {})
+                        weights = np.array(
+                            [(1.0 + scores.get(s, 0.0)) ** MINED_WEIGHT_POWER
+                             for s in negatives], dtype=np.float64)
+                        weights /= weights.sum()
+                        n_near = min(n_near, len(negatives))
+                        picked = list(rng.choice(negatives, n_near, replace=False,
+                                                 p=weights)) if n_near else []
+                        remaining = [s for s in negatives if s not in set(picked)]
+                        n_far = min(len(remaining), wanted - n_near)
+                        picked += list(rng.choice(remaining, n_far,
+                                                  replace=False)) if n_far else []
+                    else:
+                        near_set = set(near)
+                        far = [s for s in negatives if s not in near_set]
+                        n_far = min(len(far), wanted - n_near)
+                        picked = list(rng.choice(near, n_near, replace=False)) if n_near else []
+                        picked += list(rng.choice(far, n_far, replace=False)) if n_far else []
                 else:
-                    n_keep = min(len(negatives), len(positives))
+                    wanted = int(round(self.negative_ratio * len(positives)))
+                    n_keep = min(len(negatives), wanted)
                     picked = list(rng.choice(negatives, n_keep, replace=False)) if n_keep else []
 
                 chosen = sorted(positives + [int(s) for s in picked])
@@ -401,9 +456,11 @@ def load_index(preprocessed_dir):
 
 
 def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
+                      negative_ratio=1.0,
                       augment="anatomic", crop="none",
                       crop_size=DEFAULT_CROP_SIZE, n_adjacent=1, seed=42,
-                      num_workers=2, eval_sampling="all"):
+                      num_workers=2, eval_sampling="all",
+                      mined_scores=None):
     """
     Builds the train, validation, and test DataLoaders.
 
@@ -430,6 +487,12 @@ def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
         seed (int): Base seed.
         num_workers (int): DataLoader worker processes.
         eval_sampling (str): Slice selection for validation and test.
+        mined_scores (dict): {case_id: {slice index: false-positive pixels}}
+            from
+            src.training.mine_negatives. Required by sampling='mined_negatives'
+            and ignored by every other mode. Training split only - mining a
+            ranking for validation or test would select the slices the model
+            is about to be judged on.
 
     Returns:
         dict: {'train': DataLoader, 'val': DataLoader, 'test': DataLoader}
@@ -441,7 +504,8 @@ def build_dataloaders(preprocessed_dir, batch_size=16, sampling="balanced",
         "train": LungSliceDataset(
             volumes_dir, index, index["splits"]["train"],
             sampling=sampling, augment=augment, crop=crop, crop_size=crop_size,
-            n_adjacent=n_adjacent, seed=seed),
+            n_adjacent=n_adjacent, seed=seed, negative_ratio=negative_ratio,
+            mined_scores=mined_scores),
         "val": LungSliceDataset(
             volumes_dir, index, index["splits"]["val"],
             sampling=eval_sampling, augment="none", crop="none",

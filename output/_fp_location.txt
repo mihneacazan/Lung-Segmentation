@@ -1,0 +1,20 @@
+lung_001:   1982 FP | mediana   61.8 mm |  41.7% in 20 mm de tumoare
+lung_020:   1028 FP | mediana   73.0 mm |  45.9% in 20 mm de tumoare
+lung_023:    678 FP | mediana  117.9 mm |  38.6% in 20 mm de tumoare
+lung_034:    601 FP | mediana    1.2 mm |  80.7% in 20 mm de tumoare
+lung_036:   1282 FP | mediana  134.5 mm |   0.0% in 20 mm de tumoare
+lung_038:    423 FP | mediana  106.0 mm |  12.1% in 20 mm de tumoare
+lung_044:    844 FP | mediana  166.0 mm |  25.1% in 20 mm de tumoare
+lung_058:    321 FP | mediana   35.7 mm |   0.0% in 20 mm de tumoare
+lung_074:   6043 FP | mediana  105.1 mm |  17.4% in 20 mm de tumoare
+lung_093:    129 FP | mediana  137.3 mm |   1.6% in 20 mm de tumoare
+
+       densitate voxeli FP       %
+             (-2000, -700)   22.8%
+              (-700, -400)   33.3%
+              (-400, -100)   23.5%
+               (-100, 100)   16.0%
+               (100, 3000)    4.3%
+
+mediana peste pacienti: 105.5 mm
+fractie FP in 20mm de tumoare: 26.3%

@@ -342,3 +342,82 @@ def test_missing_plan_in_metadata_reads_as_stretch():
 def test_unknown_mode_is_rejected():
     with pytest.raises(ValueError, match="resize mode"):
         resize_plan((100, 100, 8), mode="squash", target_size=192)
+
+
+@pytest.mark.parametrize("slice_spacing", [1.0, 2.0, 2.5])
+def test_roundtrip_survives_a_coarser_slice_spacing(tmp_path, slice_spacing):
+    """
+    The slice axis is a free parameter, and the inverse path has to keep closing
+    at every value of it.
+
+    The default of 1.0 mm is finer than this dataset's median source thickness,
+    so it interpolates slices into existence for most patients. Raising it is the
+    fix, but reconstruction inverts by the recorded shapes rather than by
+    spacing, and that is exactly the kind of implicit coupling that breaks
+    silently: a wrong inverse still returns an array of the right size, just
+    with the mask in the wrong place.
+    """
+    from src.preprocessing.preprocessing import preprocess_case
+
+    img_hu, lbl = make_asymmetric_phantom()
+    affine = np.diag([-0.8, 0.8, 1.5, 1.0])
+    affine[:3, 3] = [100.0, -50.0, -200.0]
+
+    img_path = tmp_path / "case.nii.gz"
+    lbl_path = tmp_path / "case_lbl.nii.gz"
+    nib.save(nib.Nifti1Image(img_hu, affine), str(img_path))
+    nib.save(nib.Nifti1Image(lbl, affine), str(lbl_path))
+
+    _, lbl_stack, metadata, _ = preprocess_case(
+        "phantom", str(img_path), str(lbl_path), slice_spacing=slice_spacing)
+
+    assert metadata["target_spacing"] == [1.0, 1.0, slice_spacing], (
+        "the spacing actually used must be recorded, or the inverse path has no "
+        "way to know which dataset it is looking at")
+
+    reconstructed = reconstruct_to_original_geometry(
+        lbl_stack.astype(np.float32), metadata, threshold=0.5)
+
+    assert reconstructed.shape == lbl.shape
+    score = dice(reconstructed, lbl)
+    assert score > 0.75, (
+        f"round-trip Dice {score:.4f} at {slice_spacing} mm slices. The mask "
+        f"came back in the wrong place, not merely blurred.")
+
+
+def test_coarser_slice_spacing_actually_produces_fewer_slices(tmp_path):
+    """
+    Guards the reason for the parameter existing. If the slice count did not
+    fall, nothing would have changed except a number in the metadata: a 2.5D
+    neighbour would still be an interpolated near-duplicate, and epochs would
+    still be as long.
+
+    The resampled count is checked exactly, the cropped count only for
+    direction. `crop_body_3d` adds a fixed five-voxel margin per side, which does
+    not scale with spacing, so a 2.5x coarser volume keeps the same ten slices of
+    padding and the cropped ratio always falls short of 2.5. On a phantom this
+    dominates; on a real volume of ~314 slices it costs about 5%.
+    """
+    from src.preprocessing.preprocessing import preprocess_case
+
+    img_hu, lbl = make_asymmetric_phantom()
+    affine = np.diag([-0.8, 0.8, 1.5, 1.0])
+    nib.save(nib.Nifti1Image(img_hu, affine), str(tmp_path / "c.nii.gz"))
+    nib.save(nib.Nifti1Image(lbl, affine), str(tmp_path / "c_lbl.nii.gz"))
+
+    resampled, cropped = {}, {}
+    for spacing in (1.0, 2.5):
+        _, _, metadata, _ = preprocess_case(
+            "phantom", str(tmp_path / "c.nii.gz"), str(tmp_path / "c_lbl.nii.gz"),
+            run_qc=False, slice_spacing=spacing)
+        resampled[spacing] = metadata["resampled_shape"][2]
+        cropped[spacing] = metadata["cropped_shape"][2]
+
+    ratio = resampled[1.0] / resampled[2.5]
+    assert 2.4 < ratio < 2.6, (
+        f"the resample itself did not honour the spacing: {resampled[1.0]} "
+        f"slices at 1 mm against {resampled[2.5]} at 2.5 mm, a ratio of "
+        f"{ratio:.2f} where 2.5 was asked for")
+
+    assert cropped[2.5] < cropped[1.0], (
+        f"cropped slice count did not fall: {cropped[1.0]} -> {cropped[2.5]}")

@@ -17,6 +17,7 @@ Run:
     python -m pytest tests/test_training_smoke.py -q
 """
 
+import csv
 import json
 
 import numpy as np
@@ -261,11 +262,24 @@ def test_tumor_crop_works_for_every_architecture(tiny_project_croppable, model_t
     assert np.isfinite(report["best_val_dice_soft"])
 
 
+@pytest.mark.parametrize("model_type", ["unet", "attention_unet", "segresnet"])
 @pytest.mark.parametrize("n_adjacent", [1, 3])
-def test_2d_and_25d_both_train(tiny_project, n_adjacent):
-    """A 2.5D model must accept its stacked input all the way through."""
-    report = run(tiny_project, n_adjacent=n_adjacent, exp_name=f"smoke_{n_adjacent}")
+def test_2d_and_25d_both_train(tiny_project, model_type, n_adjacent):
+    """
+    A 2.5D model must accept its stacked input all the way through.
+
+    Crossed with the architecture rather than tested on the U-Net alone. 2.5D is
+    not a separate network here — it is `in_channels=n_adjacent` on the same
+    builder — so the two axes look independent and were tested that way, which
+    left `attention_unet` and `segresnet` at three channels covered by nothing.
+    Those are exactly the configurations someone reaches for after seeing the
+    U-Net 2.5D result, and finding out they are broken should not cost a GPU
+    session.
+    """
+    report = run(tiny_project, model_type=model_type, n_adjacent=n_adjacent,
+                 exp_name=f"smoke_{model_type}_{n_adjacent}")
     assert report["config"]["n_adjacent"] == n_adjacent
+    assert report["config"]["model_type"] == model_type
 
 
 # ============================================================================
@@ -848,3 +862,409 @@ def test_per_slice_metrics_reach_the_benchmark_report(tiny_project):
     for key in ("dice_2d_tumour_slices", "dice_2d_all_slices",
                 "precision_2d_tumour_slices"):
         assert key in report["macro_average"], f"{key} missing from macro average"
+
+
+# ============================================================================
+#  NETWORK WIDTH
+# ============================================================================
+
+@pytest.mark.parametrize("model_type", ["unet", "attention_unet", "segresnet"])
+def test_width_is_a_live_argument(model_type):
+    """
+    The guard against a decorative --model_channels: a flag accepted at the CLI,
+    recorded in the config and then dropped before the model is built would make
+    a capacity experiment compare a network against itself, while every log line
+    reported the width that was asked for.
+    """
+    from src.models.factory import build_model
+
+    narrow = build_model(model_type, in_channels=1, out_channels=1)
+    wide = build_model(model_type, in_channels=1, out_channels=1,
+                       channels=(32, 64, 128, 256, 512))
+
+    n_narrow = sum(p.numel() for p in narrow.parameters() if p.requires_grad)
+    n_wide = sum(p.numel() for p in wide.parameters() if p.requires_grad)
+    assert n_wide > 2 * n_narrow, (
+        f"{model_type}: {n_narrow:,} -> {n_wide:,} is not a doubling of width")
+
+    with torch.no_grad():
+        out = wide(torch.randn(2, 1, 64, 64))
+    assert out.shape == (2, 1, 64, 64), out.shape
+
+
+def test_default_width_is_unchanged(tiny_project):
+    """
+    Every committed experiment was trained at the default width, so leaving the
+    argument out must reproduce it exactly. Changing the default would silently
+    invalidate the whole benchmark table rather than fail anything.
+    """
+    from src.models.factory import build_model
+
+    for model_type, expected in (("unet", 1_624_844),
+                                 ("attention_unet", 1_987_417),
+                                 ("segresnet", 1_576_385)):
+        m = build_model(model_type, in_channels=1, out_channels=1)
+        n = sum(p.numel() for p in m.parameters() if p.requires_grad)
+        assert n == expected, f"{model_type} default width moved: {n:,} != {expected:,}"
+
+
+def test_width_survives_into_the_run_config(tiny_project):
+    """A width passed to the experiment must reach both the model and the record."""
+    channels = [8, 16, 32]
+    report = run(tiny_project, model_channels=channels, exp_name="smoke_width")
+
+    assert report["config"]["model_channels"] == channels
+    baseline = run(tiny_project, exp_name="smoke_width_default")
+    assert baseline["config"]["model_channels"] is None
+    assert report["parameters_trainable"] != baseline["parameters_trainable"]
+
+
+def test_max_steps_sets_the_epoch_count_from_the_sampling_mode(tiny_project):
+    """
+    An epoch is not a comparable unit across sampling modes, and every sampling
+    comparison in this project was made as though it were.
+
+    At batch 16 on the real dataset, `all` gives ~898 optimizer steps per epoch
+    and `positives` about 89. `dicece_balanced` at 0.3023 and `positives_only` at
+    0.0540 were both read against a baseline that took five to ten times as many
+    steps, so those numbers compared budgets, not sampling. `max_steps` converts
+    a step budget into whatever epoch count that mode needs.
+    """
+    budget = 24
+    report = train_mod.run_training_experiment(
+        exp_name="steps", seed=42, max_steps=budget,
+        sampling="all", eval_sampling="all", patience=99, min_epochs=1,
+        num_workers=0, surface_metrics=False, postproc_min_fraction=0.0)
+
+    per_epoch = report["steps_per_epoch"]
+    assert per_epoch > 0
+    expected_epochs = -(-budget // per_epoch)
+    assert report["epochs_run"] <= expected_epochs, (
+        f"asked for {budget} steps at {per_epoch}/epoch, which is "
+        f"{expected_epochs} epochs, but ran {report['epochs_run']}")
+    assert report["optimizer_steps"] >= budget - per_epoch
+
+
+def test_two_sampling_modes_can_be_matched_on_optimizer_steps(tiny_project):
+    """
+    The point of the budget: two modes with very different epoch sizes must end
+    up having taken comparable numbers of steps, which is what makes the
+    comparison about sampling rather than about how far the optimizer travelled.
+    """
+    budget = 20
+    runs = {}
+    for sampling in ("all", "balanced"):
+        runs[sampling] = train_mod.run_training_experiment(
+            exp_name=f"steps_{sampling}", seed=42, max_steps=budget,
+            sampling=sampling, eval_sampling="all", patience=99, min_epochs=1,
+            num_workers=0, surface_metrics=False, postproc_min_fraction=0.0)
+
+    sizes = {k: r["steps_per_epoch"] for k, r in runs.items()}
+    steps = {k: r["optimizer_steps"] for k, r in runs.items()}
+    assert sizes["all"] != sizes["balanced"], (
+        "the fixture's two sampling modes have the same epoch size, so this "
+        "test cannot show the budget doing anything")
+
+    largest_epoch = max(sizes.values())
+    assert abs(steps["all"] - steps["balanced"]) <= largest_epoch, (
+        f"step counts {steps} differ by more than one epoch despite a shared "
+        f"budget of {budget}")
+
+
+def test_optimizer_steps_are_recorded_per_epoch(tiny_project):
+    """
+    Recorded cumulatively in the history so any two committed runs can be
+    compared at equal budget after the fact, which is not possible for the
+    twenty-one runs already in the repository.
+    """
+    train_mod.run_training_experiment(
+        exp_name="steps_hist", seed=42, epochs=2, sampling="all",
+        eval_sampling="all", patience=99, min_epochs=1, num_workers=0,
+        surface_metrics=False, postproc_min_fraction=0.0)
+
+    path = (tiny_project / "experiments" / "steps_hist" / "seed_42"
+            / "training_history.csv")
+    rows = list(csv.DictReader(open(path)))
+    counts = [int(r["optimizer_steps"]) for r in rows]
+    assert counts == sorted(counts), f"step count is not monotone: {counts}"
+    assert counts[0] > 0 and counts[-1] > counts[0]
+
+
+def test_a_nonfinite_loss_never_reaches_the_optimizer():
+    """
+    The check used to run after `optimizer.step()`, so on the non-AMP path a
+    batch with a non-finite loss moved the weights and was then counted as
+    skipped. Under AMP `GradScaler` declines such a step anyway; on CPU nothing
+    did.
+    """
+    torch.manual_seed(0)
+    model = torch.nn.Conv2d(1, 1, 3, padding=1)
+    before = [p.detach().clone() for p in model.parameters()]
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+
+    batch = {"image": torch.randn(2, 1, 8, 8), "label": torch.ones(2, 1, 8, 8)}
+
+    class NanLoss(torch.nn.Module):
+        def forward(self, outputs, labels):
+            return outputs.sum() * float("nan")
+
+    loss, n_nonfinite, n_batches = train_mod.train_one_epoch(
+        model, [batch], NanLoss(), optimizer, torch.device("cpu"),
+        scaler=None, max_grad_norm=1.0)
+
+    assert (n_nonfinite, n_batches) == (1, 1)
+    for was, now in zip(before, model.parameters()):
+        assert torch.equal(was, now), (
+            "a non-finite loss moved the weights before being counted as skipped")
+        assert torch.isfinite(now).all(), "weights were poisoned to nan"
+
+
+# ============================================================================
+#  STEP-UNIT SCHEDULE AND STEP-UNIT EARLY STOPPING
+# ============================================================================
+#
+# An epoch is not a unit two sampling modes share. At batch 16 `all` runs ~898
+# optimizer steps per epoch and `balanced` at 1:1 runs ~177, so an epoch-unit
+# cosine reaches its floor after fivefold fewer updates in one of them, and an
+# epoch-unit patience gives one run fivefold the step-wise grace of the other.
+# `--schedule_unit step`, `--patience_steps` and `--min_steps` move both rules
+# onto the shared unit.
+
+def test_the_lr_moves_between_batches_under_a_step_schedule():
+    """
+    The whole difference lives inside the epoch: at an epoch boundary a cosine
+    over N epochs and one over N x steps_per_epoch sit at the same point, so
+    `training_history.csv` cannot show it. The rate has to fall batch by batch,
+    and the T_max guard has to hold it at the floor rather than let the periodic
+    schedule walk it back up.
+    """
+    model = torch.nn.Conv2d(1, 1, 3, padding=1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=4, eta_min=1e-5)
+
+    seen = []
+
+    class Recorder(torch.nn.Module):
+        def forward(self, outputs, labels):
+            seen.append(optimizer.param_groups[0]["lr"])
+            return (outputs - labels).abs().mean()
+
+    batches = [{"image": torch.randn(2, 1, 8, 8),
+                "label": torch.zeros(2, 1, 8, 8)} for _ in range(6)]
+    train_mod.train_one_epoch(model, batches, Recorder(), optimizer,
+                              torch.device("cpu"), scaler=None,
+                              max_grad_norm=1.0, scheduler=scheduler,
+                              scheduler_t_max=4)
+
+    assert len(seen) == 6
+    assert all(b <= a + 1e-15 for a, b in zip(seen, seen[1:])), (
+        f"the rate did not fall between batches: {seen}")
+    assert seen[0] > seen[3], "the rate never moved inside the epoch"
+    # Batches 5 and 6 are past T_max: held, not climbing back towards the peak.
+    assert seen[-1] == pytest.approx(1e-5, rel=1e-6), (
+        f"the tail did not hold at eta_min: {seen}")
+
+
+def test_the_step_schedule_spans_the_whole_step_budget(tiny_project):
+    """
+    The cosine must reach its floor at the end of training, not partway through
+    or not at all. With T_max in steps and the budget in steps, the last epoch's
+    rate should sit at eta_min.
+    """
+    import csv
+
+    run(tiny_project, epochs=3, schedule_unit="step", min_epochs=1, patience=99,
+        exp_name="smoke_step_span")
+    path = (tiny_project / "experiments" / "smoke_step_span" / "seed_42"
+            / "training_history.csv")
+    lrs = [float(r["lr"]) for r in csv.DictReader(open(path))]
+
+    assert all(b <= a + 1e-12 for a, b in zip(lrs, lrs[1:])), (
+        f"the rate rose again inside the budget: {lrs}")
+    assert lrs[-1] == pytest.approx(1e-3 * 0.01, rel=1e-3), (
+        f"the cosine did not reach eta_min by the end of the budget: {lrs}")
+
+
+def test_the_epoch_schedule_is_unchanged_by_the_new_parameter(tiny_project):
+    """
+    Every committed run used the per-epoch schedule. Adding the option must not
+    move it, so the default has to reproduce the old curve exactly.
+    """
+    import csv
+
+    def lrs(name, **kwargs):
+        run(tiny_project, epochs=3, lr_t_max=3, min_epochs=1, patience=99,
+            exp_name=name, **kwargs)
+        path = (tiny_project / "experiments" / name / "seed_42"
+                / "training_history.csv")
+        return [float(r["lr"]) for r in csv.DictReader(open(path))]
+
+    assert lrs("smoke_default_unit") == lrs("smoke_explicit_epoch",
+                                            schedule_unit="epoch")
+
+
+def test_step_patience_counts_steps_not_epochs():
+    """
+    The unit is the whole point. A stopper with a patience of 100 steps must not
+    fire after 100 stalled epochs that only covered 10 steps each... and must
+    fire once the steps themselves have accumulated.
+    """
+    stopper = train_mod.EarlyStopping(patience=2, min_epochs=0,
+                                      patience_steps=100, min_steps=0)
+    assert stopper.unit == "steps"
+
+    stopper.step(0.5, epoch=1, steps_taken=10)          # the best so far
+    for epoch in range(2, 12):                          # ten stalled epochs
+        fired = stopper.step(0.4, epoch=epoch, steps_taken=10 * epoch)
+        if 10 * epoch - 10 < 100:
+            assert not fired, (
+                f"stopped after {10 * epoch - 10} steps with a 100-step patience "
+                f"- the epoch counter is still in charge")
+    assert stopper.step(0.4, epoch=99, steps_taken=500), (
+        "never stopped, even 490 steps past the best")
+
+
+def test_step_patience_gives_two_sampling_modes_the_same_grace():
+    """
+    The concrete failure from notebook W: patience 46 epochs at 178 steps each is
+    8 188 steps of grace, while patience 20 at 898 is 17 960. Four of five runs
+    stopped before spending their budget and only the widest one spent it in
+    full. Under a step patience both get the same number.
+    """
+    def stall_until_stop(steps_per_epoch, **kwargs):
+        stopper = train_mod.EarlyStopping(min_epochs=0, min_steps=0, **kwargs)
+        stopper.step(0.5, epoch=1, steps_taken=steps_per_epoch)
+        epoch, steps = 1, steps_per_epoch
+        while not stopper.step(0.4, epoch=epoch, steps_taken=steps):
+            epoch += 1
+            steps += steps_per_epoch
+            assert epoch < 10_000
+        return steps - steps_per_epoch          # steps of grace after the best
+
+    narrow = stall_until_stop(178, patience_steps=8_000)
+    wide = stall_until_stop(898, patience_steps=8_000)
+    assert abs(narrow - wide) <= 898, (
+        f"step patience still favours one epoch size: {narrow} vs {wide}")
+
+    # And the epoch-unit stopper is what it replaces: same patience, wildly
+    # different step budgets.
+    narrow_ep = stall_until_stop(178, patience=20)
+    wide_ep = stall_until_stop(898, patience=20)
+    assert wide_ep > 4 * narrow_ep
+
+
+def test_config_records_the_step_unit_settings(tiny_project):
+    """A run whose stopping rule is not in config.json cannot be reproduced."""
+    report = run(tiny_project, epochs=2, schedule_unit="step",
+                 patience_steps=50, min_steps=10, exp_name="smoke_step_cfg")
+    config = report["config"]
+    assert config["schedule_unit"] == "step"
+    assert config["patience_steps"] == 50
+    assert config["min_steps"] == 10
+
+
+def test_a_step_budget_run_spends_all_of_it():
+    """
+    The failure this exists to prevent: notebook 1's first attempt set a step
+    patience of 9 000 on a 49 390-step budget, and the three seeds spent 53%,
+    65% and 76% of it. They were not step-matched, they kept checkpoints from
+    learning rates two to seven times apart, and the spread across seeds tripled
+    against the runs they were reproducing. Where the budget is the control, the
+    stopping rule has to be off.
+    """
+    stopper = train_mod.EarlyStopping(patience=1, min_epochs=0,
+                                      patience_steps=0, min_steps=0)
+    stopper.step(0.9, epoch=1, steps_taken=898)
+    for epoch in range(2, 56):                       # the whole 55-epoch budget
+        assert not stopper.step(0.1, epoch=epoch, steps_taken=898 * epoch), (
+            f"stopped at epoch {epoch} with early stopping disabled; the run "
+            f"would have spent {100 * epoch / 55:.0f}% of its budget")
+
+    # patience=0 disables the epoch path the same way.
+    stopper = train_mod.EarlyStopping(patience=0, min_epochs=0)
+    stopper.step(0.9, epoch=1)
+    assert not any(stopper.step(0.1, epoch=e) for e in range(2, 100))
+
+
+def test_disabling_does_not_break_a_real_stopping_rule():
+    """The escape hatch must not silently disable runs that asked for a rule."""
+    stopper = train_mod.EarlyStopping(patience=2, min_epochs=0)
+    stopper.step(0.9, epoch=1)
+    assert any(stopper.step(0.1, epoch=e) for e in (2, 3, 4))
+
+    stopper = train_mod.EarlyStopping(patience=99, min_epochs=0,
+                                      patience_steps=500, min_steps=0)
+    stopper.step(0.9, epoch=1, steps_taken=100)
+    assert any(stopper.step(0.1, epoch=e, steps_taken=100 * e)
+               for e in range(2, 20))
+
+
+def test_the_budget_is_actually_spent_end_to_end(tiny_project):
+    """
+    The unit test above checks the rule; this checks the wiring. A run with the
+    stopping rule off has to report the planned number of steps, not fewer.
+    """
+    report = run(tiny_project, epochs=4, patience_steps=0, min_steps=0,
+                 schedule_unit="step", exp_name="smoke_full_budget")
+    planned = report["steps_per_epoch"] * 4
+    assert report["epochs_run"] == 4, (
+        f"stopped after {report['epochs_run']} of 4 epochs")
+    assert report["optimizer_steps"] == planned, (
+        f"{report['optimizer_steps']} steps taken, {planned} planned")
+
+
+def test_a_resumed_run_keeps_its_step_count(tiny_project):
+    """
+    The step count is what every comparison in this project is controlled on, so
+    it has to survive a resume. It used to reset to zero, which would have made a
+    run that resumed at 65% of its budget report the remaining 35% as the whole
+    thing.
+    """
+    first = run(tiny_project, epochs=2, schedule_unit="step", patience_steps=0,
+                min_steps=0, exp_name="smoke_resume")
+    exp_dir = tiny_project / "experiments" / "smoke_resume" / "seed_42"
+
+    second = run(tiny_project, epochs=4, schedule_unit="step", patience_steps=0,
+                 min_steps=0, exp_name="smoke_resume",
+                 resume_path=str(exp_dir / "checkpoint.pt"))
+
+    per_epoch = first["steps_per_epoch"]
+    assert second["optimizer_steps"] == 4 * per_epoch, (
+        f"resumed run reported {second['optimizer_steps']} steps; the four "
+        f"epochs it has now run total {4 * per_epoch}")
+    assert second["optimizer_steps"] > first["optimizer_steps"]
+
+
+def test_config_records_the_schedule_that_actually_ran(tiny_project):
+    """
+    `config.json` is assembled from the caller's arguments before `max_steps`
+    recomputes the epoch count and the annealing period, so it used to record
+    the arguments rather than the run. `base_corrected_seed42` came back saying
+    epochs=50 and lr_t_max=50 having actually run 55 epochs under a 49 390-step
+    cosine: replaying that config would have produced a different experiment.
+    """
+    report = run(tiny_project, epochs=99, max_steps=12, schedule_unit="step",
+                 patience_steps=0, min_steps=0, exp_name="smoke_cfg_truth")
+    config = json.load(open(
+        tiny_project / "experiments" / "smoke_cfg_truth" / "seed_42" / "config.json"))
+
+    assert config["epochs"] == report["epochs_run"] <= 99, (
+        f"config says {config['epochs']} epochs, run did {report['epochs_run']}")
+    assert config["scheduler_t_max_unit"] == "steps"
+    assert config["scheduler_t_max"] == config["epochs"] * report["steps_per_epoch"]
+    # 0 and None mean opposite things and must not be folded together.
+    assert config["patience_steps"] == 0
+    assert config["early_stopping_disabled"] is True
+
+
+def test_config_still_tells_the_truth_for_an_epoch_schedule(tiny_project):
+    """The default path must keep recording epochs, in epochs."""
+    report = run(tiny_project, epochs=3, lr_t_max=2, exp_name="smoke_cfg_epoch")
+    config = json.load(open(
+        tiny_project / "experiments" / "smoke_cfg_epoch" / "seed_42" / "config.json"))
+    assert config["scheduler_t_max_unit"] == "epochs"
+    assert config["scheduler_t_max"] == 2
+    assert config["lr_t_max"] == 2
+    assert config["patience_steps"] is None
+    assert config["early_stopping_disabled"] is False

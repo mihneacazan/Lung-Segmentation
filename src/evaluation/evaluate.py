@@ -49,6 +49,7 @@ from src.evaluation.metrics import (
     compute_macro_micro_averages,
     stratified_report,
     threshold_sweep,
+    threshold_sweep_original_geometry,
 )
 
 
@@ -206,7 +207,7 @@ def collect_predictions(model, dataloader, device, sw_roi=None, sw_overlap=0.5):
 
 def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
                   save_nifti_dir=None, postproc_min_fraction=0.10,
-                  surface_metrics=True):
+                  surface_metrics=True, require_full_coverage=True):
     """
     Reconstructs each patient's prediction into their original NIfTI geometry and
     computes the full metric set against the untouched ground-truth mask.
@@ -234,6 +235,10 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
             largest component. 0 skips the post-processed metric set entirely.
         surface_metrics (bool): False skips HD95 and ASD, which dominate the cost
             of an evaluation. Use it for comparisons decided on overlap.
+        require_full_coverage (bool): Refuse to score a patient whose slices were
+            not all predicted. False evaluates whatever was supplied and makes
+            the result an oracle positive-slices measurement, not a volume one;
+            the caller is then responsible for labelling it that way.
 
     Returns:
         tuple: (patient_metrics, patient_pred_masks, patient_gt_masks, pp_micro)
@@ -260,7 +265,8 @@ def evaluate_full(probs, inference_times, metadata_dir, threshold=0.5,
             metadata = json.load(f)
 
         pred_3d = reconstruct_patient_3d_volume(
-            slice_dict, metadata, threshold=threshold, binarize=True)
+            slice_dict, metadata, threshold=threshold, binarize=True,
+            require_full_coverage=require_full_coverage)
 
         gt_path = resolve_nifti_path(f"./labelsTr/{case_id}.nii.gz")
         gt_3d = (np.asanyarray(nib.load(gt_path).dataobj) > 0.5).astype(np.uint8)
@@ -335,6 +341,8 @@ def print_report(title, patient_metrics, averages, strat, threshold):
     print(f"  Sensitivity:     {_mean('sensitivity_3d'):.4f}")
     print(f"  Precision:       {_mean('precision_3d'):.4f}")
     print(f"  Specificity:     {_mean('specificity_3d'):.4f}")
+    print(f"  Vol pred/true:   {_mean('volume_ratio_3d'):.3f}"
+          f"   (<1 under-segments, >1 over-paints)")
     print(f"  HD95:            {_mean('hd95_3d'):.2f} mm")
     print(f"  ASD:             {_mean('asd_3d'):.2f} mm")
     print(f"  FP components:   {_mean('fp_components'):.2f}")
@@ -503,7 +511,7 @@ def main():
     threshold = args.threshold
     if args.sweep_threshold:
         print("\n--- Threshold sweep (validation only) ---")
-        threshold, sweep = threshold_sweep(probs, labels)
+        threshold, sweep = threshold_sweep_original_geometry(probs, metadata_dir)
         with open(os.path.join(output_dir, "threshold_sweep.json"), "w") as f:
             json.dump({"best_threshold": threshold,
                        "sweep_results": {str(k): v for k, v in sweep.items()}},

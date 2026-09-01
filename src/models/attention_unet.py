@@ -13,7 +13,8 @@ import torch
 from monai.networks.nets import AttentionUnet
 
 
-def build_attention_unet(in_channels=1, out_channels=1, spatial_dims=2):
+def build_attention_unet(in_channels=1, out_channels=1, spatial_dims=2,
+                         channels=None):
     """
     Builds a 2D Attention U-Net model using MONAI.
     
@@ -24,16 +25,19 @@ def build_attention_unet(in_channels=1, out_channels=1, spatial_dims=2):
         in_channels (int): Number of input channels (1 for 2D, 3/5 for 2.5D).
         out_channels (int): Number of output channels (1 for binary segmentation).
         spatial_dims (int): 2 for 2D segmentation.
+        channels (tuple|None): Filters per encoder level. Defaults to the
+            benchmark width; `strides` follows its length.
         
     Returns:
         MONAI AttentionUnet model.
     """
+    channels = tuple(channels) if channels else (16, 32, 64, 128, 256)
     model = AttentionUnet(
         spatial_dims=spatial_dims,
         in_channels=in_channels,
         out_channels=out_channels,
-        channels=(16, 32, 64, 128, 256),
-        strides=(2, 2, 2, 2),
+        channels=channels,
+        strides=(2,) * (len(channels) - 1),
         dropout=0.1
     )
     return model

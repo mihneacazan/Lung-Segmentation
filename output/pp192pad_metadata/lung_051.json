@@ -1,0 +1,100 @@
+{
+    "case_id": "lung_051",
+    "original_affine": [
+        [
+            -0.78125,
+            0.0,
+            0.0,
+            191.390625
+        ],
+        [
+            0.0,
+            0.78125,
+            0.0,
+            -200.91561889648438
+        ],
+        [
+            0.0,
+            0.0,
+            2.5,
+            -371.5625
+        ],
+        [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        ]
+    ],
+    "original_shape": [
+        512,
+        512,
+        155
+    ],
+    "original_spacing": [
+        0.78125,
+        0.78125,
+        2.5
+    ],
+    "ornt": [
+        [
+            0.0,
+            -1.0
+        ],
+        [
+            1.0,
+            1.0
+        ],
+        [
+            2.0,
+            1.0
+        ]
+    ],
+    "canonical_shape": [
+        512,
+        512,
+        155
+    ],
+    "canonical_spacing": [
+        0.78125,
+        0.78125,
+        2.5
+    ],
+    "target_spacing": [
+        1.0,
+        1.0,
+        1.0
+    ],
+    "resampled_shape": [
+        400,
+        400,
+        388
+    ],
+    "crop_bbox": {
+        "x_min": 0,
+        "x_max": 400,
+        "y_min": 51,
+        "y_max": 367,
+        "z_min": 0,
+        "z_max": 388
+    },
+    "cropped_shape": [
+        400,
+        316,
+        388
+    ],
+    "target_slice_size": [
+        192,
+        192
+    ],
+    "resize_plan": {
+        "mode": "pad",
+        "target_size": 192,
+        "square_side": 400,
+        "pad_top": 0,
+        "pad_left": 42
+    },
+    "mask_order": 1,
+    "hu_min": -1000.0,
+    "hu_max": 400.0
+}

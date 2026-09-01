@@ -195,7 +195,7 @@ def verify_case(case_id, img_nii, lbl_nii, img_data, lbl_data):
 
 def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
                     resize_mode="stretch", target_size=None, mm_per_px=None,
-                    mask_order=1):
+                    mask_order=1, slice_spacing=None):
     """
     Runs the full forward preprocessing pipeline for one patient.
 
@@ -216,6 +216,14 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
             becomes tumour when the source region it covers was mostly tumour —
             whereas nearest copies one source pixel and discards the rest, so
             the boundary lands wherever the sampling grid happens to fall.
+        slice_spacing (float): Millimetres between slices after resampling.
+            Defaults to TARGET_SPACING[2], which is 1.0 and is finer than this
+            dataset's median source thickness of 1.245 mm — so the default
+            interpolates slices into existence for 49 of 63 patients, a median
+            of 20% of them and up to 60%. A 2.5D model reading three such
+            neighbours is largely reading one slice three times. Raising this
+            to roughly the source thickness makes an adjacent slice carry
+            independent anatomy, and proportionally shortens every epoch.
             Measured over four patients, bilinear keeps 0.015-0.02 more
             round-trip Dice at identical positive-slice counts, which is why it
             is the default. Nearest is kept because it is the conventional
@@ -230,6 +238,8 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
             qc (dict): quality-control measurements for this case.
     """
     target_size = int(target_size or TARGET_SLICE_SIZE[0])
+    target_spacing = (TARGET_SPACING[0], TARGET_SPACING[1],
+                      float(slice_spacing if slice_spacing else TARGET_SPACING[2]))
     img_nii = nib.load(img_path)
     lbl_nii = nib.load(lbl_path)
 
@@ -249,10 +259,13 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
     canonical_shape = tuple(img_hu.shape)
     canonical_spacing = permute_spacing(original_spacing, ornt)
 
-    # --- Step 2: resample to 1mm isotropic ---
+    # --- Step 2: resample to the target spacing ---
     # Trilinear for CT intensities, nearest-neighbour for the binary mask.
-    img_hu = resample_volume(img_hu, canonical_spacing, TARGET_SPACING, order=1)
-    lbl_res = resample_volume(lbl_raw, canonical_spacing, TARGET_SPACING, order=0)
+    # In plane this is always 1mm and is largely undone by the resize in step 5;
+    # only the slice axis is a free parameter, because only it changes what a
+    # 2.5D neighbour actually contains.
+    img_hu = resample_volume(img_hu, canonical_spacing, target_spacing, order=1)
+    lbl_res = resample_volume(lbl_raw, canonical_spacing, target_spacing, order=0)
     lbl_res = (lbl_res > 0.5).astype(np.uint8)
     resampled_shape = tuple(img_hu.shape)
 
@@ -301,7 +314,7 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
         "ornt": np.asarray(ornt).tolist(),
         "canonical_shape": list(canonical_shape),
         "canonical_spacing": list(canonical_spacing),
-        "target_spacing": list(TARGET_SPACING),
+        "target_spacing": list(target_spacing),
         "resampled_shape": list(resampled_shape),
         "crop_bbox": crop_bbox,
         "cropped_shape": list(cropped_shape),
@@ -365,7 +378,7 @@ def preprocess_case(case_id, img_path, lbl_path, run_qc=True,
 
 
 def preprocess_all(run_qc=True, resize_mode="stretch", target_size=None,
-                   mm_per_px=None, mask_order=1,
+                   mm_per_px=None, mask_order=1, slice_spacing=None,
                    preprocessed_name="preprocessed",
                    metadata_name="metadata", qc_name="preprocessing_qc.csv"):
     """
@@ -384,6 +397,8 @@ def preprocess_all(run_qc=True, resize_mode="stretch", target_size=None,
             `src.geometry.RESIZE_MODES`.
         target_size (int): Side of that grid. Defaults to TARGET_SLICE_SIZE.
         mm_per_px (float): Millimetres per pixel, `fixed_mm` only.
+        slice_spacing (float): Millimetres between slices after resampling;
+            see `preprocess_case`. None keeps TARGET_SPACING[2].
         mask_order (int): Label interpolation order on the 2D resize; see
             `preprocess_case`.
         preprocessed_name, metadata_name, qc_name (str): Output names.
@@ -423,7 +438,8 @@ def preprocess_all(run_qc=True, resize_mode="stretch", target_size=None,
         "resize_mode": resize_mode,
         "mm_per_px": mm_per_px,
         "mask_order": int(mask_order),
-        "target_spacing": list(TARGET_SPACING),
+        "target_spacing": [TARGET_SPACING[0], TARGET_SPACING[1],
+                           float(slice_spacing or TARGET_SPACING[2])],
         "hu_window": [HU_MIN, HU_MAX],
         "splits": {"train": [], "val": [], "test": []},
         "cases": {},
@@ -449,6 +465,7 @@ def preprocess_all(run_qc=True, resize_mode="stretch", target_size=None,
                 resize_mode=resize_mode,
                 target_size=target_size,
                 mm_per_px=mm_per_px,
+                slice_spacing=slice_spacing,
                 mask_order=mask_order,
             )
         except Exception as e:
@@ -569,6 +586,18 @@ if __name__ == "__main__":
                              "way. Note the 3D resample already uses nearest "
                              "for the label regardless, because interpolating "
                              "along Z would invent tissue between slices.")
+    parser.add_argument("--slice_spacing", type=float, default=None,
+                        help="Millimetres between slices after the 3D resample. "
+                             "Default 1.0, which is FINER than this dataset's "
+                             "median source thickness of 1.245 mm: 49 of 63 "
+                             "patients get slices interpolated into existence, "
+                             "a median of 20% of them and up to 60%. A 2.5D "
+                             "model reading three of those is largely reading "
+                             "one slice three times. Setting this near the "
+                             "source thickness (2.0-2.5) makes a neighbour "
+                             "carry independent anatomy and shortens every "
+                             "epoch proportionally. Always pair it with "
+                             "--out_name: it produces a different dataset.")
     parser.add_argument("--out_name", type=str, default=None,
                         help="Writes to output/{out_name}/ and "
                              "output/{out_name}_metadata/ instead of the "
@@ -580,10 +609,16 @@ if __name__ == "__main__":
         preprocess_all(run_qc=not args.skip_qc, resize_mode=args.resize_mode,
                        target_size=args.target_size, mm_per_px=args.mm_per_px,
                        mask_order=args.mask_order,
+                       slice_spacing=args.slice_spacing,
                        preprocessed_name=args.out_name,
                        metadata_name=f"{args.out_name}_metadata",
                        qc_name=f"{args.out_name}_qc.csv")
     else:
+        if args.slice_spacing:
+            parser.error("--slice_spacing changes the dataset, so it needs "
+                         "--out_name too. Writing it over output/preprocessed/ "
+                         "would silently invalidate every committed experiment, "
+                         "whose metadata records 1.0 mm slices.")
         preprocess_all(run_qc=not args.skip_qc, resize_mode=args.resize_mode,
                        target_size=args.target_size, mm_per_px=args.mm_per_px,
                        mask_order=args.mask_order)
