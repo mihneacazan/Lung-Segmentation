@@ -28,6 +28,7 @@ output/slice_overlays_compare.zip
 # notebooks and their logs, downloaded result archives already unpacked into
 # output/experiments/, and write-ups addressed to a particular reader.
 Stages.md
+SUMMARY.md
 *_Radu.md
 special_experiments/
 docs/
