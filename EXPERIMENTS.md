@@ -345,7 +345,7 @@ python -m src.evaluation.hierarchical_report --runs all
 | Focal Tversky (β=0.6) | 0.4167 | 0.2936 | 0.1445 | 0.0864 | 35% | 72% |
 | Tversky (β=0.7) | 0.3627 | 0.5140 | 0.1174 | 0.0771 | 44% | 47% |
 
-Sorted by the column this project quotes. `slices failed` is the share of
+Sorted by the column this project quotes (3D Dice per pacient). `slices failed` is the share of
 tumour-bearing slices scoring below 0.10; `false alarms` is the share of empty
 slices carrying any prediction at all.
 
@@ -377,62 +377,6 @@ and nothing stops the network from painting everywhere. Judged per slice, that
 pathology reads as the best delineation in the project. Judged per patient, it
 reads as the worst model in the project. Both readings are arithmetically
 correct.
-
-### What each of the other views is worth
-
-**Per-slice over every slice tracks per-patient Dice** (r = +0.877, Spearman
-+0.765), because the empty slices are back and false positives cost something
-again. It is the one per-slice figure that can be quoted beside a per-patient
-number without misleading. It sits high in absolute terms — 0.9071 at the top —
-for a reason that has nothing to do with model quality: about 91% of slices in
-these volumes hold no tumour, and a slice correctly left empty scores 1.0 by
-convention. Most of that average is the model being correctly silent.
-
-**Per-lesion Dice is degenerate on this dataset**, and the report says so rather
-than hiding it. Every test patient has one component holding 99.4% or more of the
-tumour volume; the remaining 34 of 44 ground-truth components are annotation
-fragments, mostly a single voxel. Unfiltered they score zero and drag the mean to
-0.1387 for the baseline. Filtered at 100 voxels they vanish and the metric
-collapses onto per-patient Dice — 0.5435 against 0.5070. Either way it carries no
-information here that per-patient Dice does not already carry, which is itself
-worth being able to demonstrate rather than assert. It also correlates
-*negatively* with per-patient Dice (r = −0.359), for the same reason the per-slice
-view does: an over-segmenting model covers the fragments too.
-
-### The spread each view allows
-
-| view | range across 21 runs | spread |
-|---|---|---:|
-| 2D, tumour slices | 0.2561 – 0.4167 | 0.161 |
-| 3D, per lesion | 0.0853 – 0.2237 | 0.138 |
-| 3D, per patient | 0.0771 – 0.5070 | 0.430 |
-| 2D, every slice | 0.2936 – 0.9071 | 0.614 |
-
-Per-slice tumour Dice compresses the entire benchmark into a 0.16-wide band. The
-worst model in the project and the best sit 0.16 apart on it, against 0.43 on the
-metric that charges for false positives. A metric that cannot separate a model
-predicting almost nothing extra from one predicting seven times the real tumour
-volume is not measuring the thing this task is about.
-
-### Post-processing moves the views in opposite directions
-
-Dropping predicted connected components below 10% of the largest, averaged over
-all 21 runs:
-
-| view | raw | filtered | Δ |
-|---|---:|---:|---:|
-| 2D, tumour slices | 0.3304 | 0.2957 | −0.035 |
-| 2D, every slice | 0.7381 | 0.8590 | **+0.121** |
-| 3D, per patient | 0.2852 | 0.2947 | +0.010 |
-| 3D, per lesion | 0.1261 | 0.1104 | −0.016 |
-
-The filter removes satellite predictions, which live overwhelmingly on slices
-away from the tumour. So it barely touches the tumour slices — and slightly hurts
-them, by occasionally deleting a genuine disconnected piece — while cleaning up
-the empty slices dramatically. The direction of the post-processing verdict
-depends on which view is asked, which is the argument for reporting all of them.
-
----
 
 ## The controlled experiments
 
@@ -809,66 +753,16 @@ for the full account.
 
 ### Output layout
 
-Each run writes to `output/experiments/{run}/seed_{seed}/`: `config.json`,
+Each run writes to `output/experiments/{exp_name}/seed_{seed}/`: `config.json`,
 `best_model.pt`, `checkpoint.pt`, `training_history.csv`, `threshold_sweep.json`,
 `test_results_per_patient.csv`, `benchmark_report.json`. `config.json`'s `exp_name`
 field is rewritten to match its directory when results are archived, so the two
 never disagree. With multiple seeds, `multi_seed_summary.json` is added one level
 up with mean ± standard deviation across seeds for Dice 3D, HD95, sensitivity and
-precision — see `output/experiments/baseline_unet_dicece_allslices/` for the only run in this project
+precision — see `output/experiments/baseline/` for the only run in this project
 with more than one seed.
 
 ---
-
-### Mask interpolation: nearest against bilinear (`nn_` runs)
-
-The pipeline used **two different conventions for the same object**, which is what
-prompted this check:
-
-| step | mask interpolation |
-|---|---|
-| 3D resample to 1 mm isotropic | `order=0`, nearest |
-| 2D resize onto the network grid | `order=1`, bilinear, then threshold at 0.5 |
-
-The first is correct and stays: linear interpolation along Z would blend
-neighbouring slices and invent tissue between them. The second is the one worth
-questioning, and the `nn_` prefix marks runs that use **nearest** there instead —
-`--mask_order 0`. It is a preprocessing flag, so it does not appear in the training
-`config.json`; the prefix is the only marker.
-
-**Mask fidelity says bilinear.** Pushing each mask through the resize and back, on
-four patients:
-
-| patient | positive slices kept | Dice, bilinear | Dice, nearest |
-|---|---:|---:|---:|
-| lung_001 | 18 / 18 | **0.9271** | 0.9059 |
-| lung_034 | 34 / 34 | **0.9322** | 0.9155 |
-| lung_074 | 68 / 68 | **0.8906** | 0.8769 |
-| lung_058 | 13 / 13 | **0.9070** | 0.8935 |
-
-Bilinear wins consistently by 0.015–0.02 and keeps the same number of positive
-slices. Downsampling with nearest copies one source pixel and discards the rest, so
-the boundary lands wherever the sampling grid happens to fall; bilinear followed by
-a 0.5 threshold is an area-weighted vote — a pixel becomes tumour when the region
-it covers was mostly tumour.
-
-**Trained models do not agree with that, or with each other:**
-
-| configuration | bilinear | nearest | Δ |
-|---|---:|---:|---:|
-| baseline, seed 42 | 0.5069 | 0.4379 | −0.0690 |
-| baseline, seed 43 | 0.4751 | 0.4254 | −0.0497 |
-| Attention U-Net | 0.3155 | 0.3664 | +0.0509 |
-| SegResNet | 0.4181 | 0.4063 | −0.0118 |
-| 2.5D U-Net | 0.4259 | 0.4954 | +0.0696 |
-
-Mean **−0.0020**, two of five favouring nearest, and a spread of 0.139 between the
-extremes. That is a null result dressed as disagreement: every one of these
-differences is inside the ±0.1209 band, and the sign flips with architecture. The
-more reliable evidence is the fidelity table, which is a direct measurement of the
-thing being changed rather than a downstream proxy.
-
-Bilinear was kept. These runs pre-date the evaluation corrections.
 
 ---
 
@@ -921,24 +815,20 @@ volumes.
 
 ### 15 — Hard negatives chosen by the model's own errors
 
-Section 7 drew negatives by distance from the tumour. A better rule is to train on
-everything first, run the model over the training set, and oversample the negative
-slices where it actually produces false positives —
+Section 7 drew negatives by distance from the tumour. Here, the model is run over the training set, and the negative
+slices where it actually produces false positives are oversampled—
 [`mine_negatives.py`](src/training/mine_negatives.py).
 
-| second stage | Dice raw | Dice post | FP raw | FP post |
-|---|---:|---:|---:|---:|
-| stage 1 only, all slices | 0.3940 | 0.4167 | 10.20 | 1.80 |
-| distance-based negatives | 0.3982 | 0.4146 | 8.90 | 1.70 |
-| **mined** negatives | 0.4194 | 0.4396 | 10.80 | 1.20 |
-| **randomly chosen** negatives | 0.4201 | 0.4374 | 10.80 | 1.60 |
+| second stage | Dice raw | Dice post |
+|---|---:|---:|
+| stage 1 only, all slices | 0.3940 | 0.4167 |
+| distance-based negatives | 0.3982 | — |
+| **mined** negatives | 0.4194 | 0.4323 |
+| **randomly chosen** negatives | 0.4201 | — |
 
-Mined and random negatives are **indistinguishable** — 0.4194 against 0.4201 raw,
-0.4396 against 0.4374 after post-processing, both gaps two orders of magnitude
-inside the noise band. The gain over stage 1 comes from a second stage existing at
-all, not from which negatives it uses, so the mining machinery earns nothing on
-this dataset. Distance-based selection, the rule section 7 used, is the weakest of
-the three.
+Mined and random negatives are **indistinguishable** (0.4194 against 0.4201). The
+gain over stage 1 comes from a second stage existing at all, not from which
+negatives it uses, so the mining earns nothing on this dataset.
 
 ### 16 — Two-stage training
 
@@ -986,12 +876,6 @@ halves.** That is the predicted behaviour, and it is the metric the argument is
 about: a model that has stopped firing on structures which appear in one slice and
 vanish in the next.
 
-Paired per patient against the 2D control, on final weights: ±1 mm +0.0351
-[−0.0590, +0.1293]; ±2 mm +0.0584 [−0.1027, +0.2195]; ±3 mm +0.0058
-[−0.1137, +0.1253]. Every Dice interval contains zero, so the **Dice** effect is
-not established on a single seed. The false-positive reduction is large and
-monotone in width up to 5 channels.
-
 ±2 mm is the peak: 3 channels is too narrow to distinguish a vessel from a
 tumour, and 7 overshoots. The same ordering appears independently at 320 x 320 in
 section 19.
@@ -1007,15 +891,13 @@ and was measured first on CPU
 |---|---:|---:|---:|
 | 192 pad | 0.9320 | 0.8979 | 0.8355 |
 | 256 pad | 0.9477 | 0.9237 | 0.8792 |
-| 320 pad | 0.9549 | **0.9347** | 0.9115 |
+| 320 pad | 0.9549 | 0.9347 | 0.9115 |
 | 192 stretch | 0.9386 | 0.9081 | 0.8602 |
 | 256 stretch | 0.9512 | 0.9281 | 0.8957 |
 | 320 stretch | 0.9583 | 0.9387 | 0.9100 |
 
 Small tumours have the lowest ceiling at 192 and gain most from 320 — +0.037
-against +0.023 overall — so the concern about lost information is measurable. But
-the model sits near 0.45 against a 0.93 ceiling, so the ceiling is not the binding
-constraint and a higher one does not by itself predict a higher score.
+against +0.023 overall — so the concern about lost information is measurable.
 
 Trained:
 
@@ -1070,42 +952,6 @@ Dice 0.5659 raw and 0.5834 after post-processing**, with false-positive componen
 falling from 5.30 to 0.80 per patient and precision rising from 0.6398 to 0.7004
 under the same filter. Sensitivity is essentially unchanged (0.5574 → 0.5527), so
 the filter is removing spurious components rather than trimming the tumour.
-
-Five channels beats seven here as it does at 192, which is two independent
-confirmations that ±2 mm is the right width. Neither within-320 contrast is
-established on its own: 7ch − 5ch is −0.0395 [−0.0956, +0.0166]; stretch − pad is
-+0.0295 [−0.0311, +0.0901].
-
-Stacked against the corrected 2D baseline the gain is +0.1129, essentially exactly
-the ±0.1209 noise band, so one seed pair does not establish it. What supports it
-is consistency: 5 channels beats 1 at 192 and beats 7 at 320, and every arm with
-context has fewer false positives than every arm without.
-
-#### What running the fourth cell properly would settle
-
-`B_res320_25d7` is the observation that motivated this whole grid: 2.50
-false-positive components against the baseline's 7.3 was the lowest count the
-project had produced, and nobody could say which of its four differences caused
-it. Running the cell at matched settings resolves that, and two other things with
-it.
-
-It completes the resize-mode contrast. At present **the claim that stretch beats
-pad rests on the 5-channel column alone**, a single pairing whose interval already
-contains zero.
-
-It separates context width from Z spacing. Every context result in this document
-was measured at 1.0 mm, where 7 channels reach ±3 mm and are *worse* than 5. The
-one run at 2.5 mm reached ±7.5 mm and produced the best false-positive count on
-record. Those two facts are compatible — the optimum may simply lie beyond ±3 mm —
-but nothing here distinguishes that from the budget or the resolution doing the
-work. If wider physical context is what suppresses false positives, the cheaper
-route is coarser Z spacing rather than more channels, since a 7-channel window at
-2.5 mm costs the same per step as one at 1.0 mm while covering 2.5x the anatomy.
-
-Written as a prediction before the run: it will land below the stretch/5-channel
-arm on Dice, since 5 channels beats 7 at both 192 and 320, and its false-positive
-count will not reproduce 2.50 — which would mean the historic number came from the
-2.5 mm spacing rather than from the configuration this cell names.
 
 ### 20 — Lung mask and two-stage localisation
 
@@ -1387,7 +1233,7 @@ how wide the intervals actually are.
 
 ## Where the results live
 
-Every run writes to `output/experiments/{run}/seed_{n}/`:
+Every run writes to `output/experiments/{exp_name}/seed_{n}/`:
 `benchmark_report.json`, `config.json`, `threshold_sweep.json`,
 `training_history.csv`, `test_results_per_patient.csv` and `best_model.pt`.
 96 runs are stored.
@@ -1398,8 +1244,6 @@ group rather than as single runs: `multi_seed_summary.json`,
 why the same checkpoints appear in this document with two sets of scores — and
 `ensemble_report.json`.
 
-### The six required metrics
-
 Every experiment reports, on the all-slice evaluation: **Dice 3D, sensitivity,
 precision, predicted-to-true volume ratio, false-positive component count, and the
 share of negative slices given at least one tumour pixel.** Each catches a failure
@@ -1408,21 +1252,6 @@ per patient while firing on empty slices. The volume ratio is reported as a medi
 because on one run the mean read 1.809 while eight of ten patients were
 under-segmenting: a single patient with 188 ground-truth voxels produced a ratio of
 9.27 on its own.
-
-Two notes on coverage across the 96 stored runs:
-
-**Volume ratio** was not recorded by the earlier reporting code. It has been
-backfilled into 53 reports as `sensitivity / precision`, which is exactly
-predicted volume over true volume — both share the same true-positive numerator,
-so their ratio is Pred/GT. The identity was checked against the 398 patient records
-that carry all three values and agrees to 9x10⁻¹⁶. Those reports carry a
-`volume_ratio_3d_note` field recording that it was derived rather than measured.
-
-**Negative-slice firing rate** cannot be reconstructed after the fact — it needs
-the per-slice predictions, not the summary. All **53 runs under the corrected
-protocol record it**. The 43 that do not are all pre-correction runs, whose numbers
-are superseded anyway; re-scoring them would mean re-running inference from their
-stored checkpoints.
 
 ---
 
@@ -1459,9 +1288,9 @@ stored checkpoints.
 | lung-mask coverage ceiling | `src/preprocessing/lung_mask.py` → `output/lung_mask_coverage.json` |
 | cross-validation over all 63 patients | `src/training/cross_validation.py` → `output/cv_folds.json` |
 | seed ensemble, probabilities averaged | `src/evaluation/ensemble.py` → `output/ensemble_report.json` |
-| seed ensemble, probabilities averaged | `output/experiments/baseline_unet_dicece_allslices/ensemble_report.json` |
-| baseline re-swept in original geometry | `output/experiments/baseline_unet_dicece_allslices/threshold_rescore.json` |
-| every run's artifacts | `output/experiments/{run}/seed_{n}/` — 96 runs, [indexed](output/experiments/README.md) |
+| seed ensemble, probabilities averaged | `output/experiments/baseline/ensemble_report.json` |
+| baseline re-swept in original geometry | `output/experiments/baseline/threshold_rescore.json` |
+| every run's artifacts | `output/experiments/{exp_name}/seed_{n}/` — 96 runs |
 | every measured result, one row per arm | `output/all_experiment_results.csv` |
 | Z spacing for 2.5D | uniform by construction — 1 mm isotropic resampling precedes stacking |
 | per-model reporting | `benchmark_report.json`: parameters, time per epoch, GPU memory, inference time per volume |
